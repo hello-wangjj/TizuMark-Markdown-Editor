@@ -775,9 +775,17 @@ function convertAlerts(content) {
       // 将 END 标记附着到最后一行内容末尾，避免增加额外行
       if (contentLines.length > 0) {
         contentLines[contentLines.length - 1] += '<!--ALERTBLOCK_' + idx + '_END-->';
+        result.push('<!--ALERTBLOCK_' + idx + '-->');
+        result.push(contentLines.join('\n'));
+      } else {
+        // 空提示块（`> [!TYPE]` 后面没有内容行）：两端标记必须**成对**输出。
+        // restoreAlerts 要求 startPos/endPos 同时命中，缺 END 会把整块丢弃 —— 预览里只写
+        // 一行的 `> [!NOTE]` 会凭空消失；WYSIWYG 编辑态「上段只有标记行」（光标停在紧跟
+        // 标记行的第一行正文上）同样因此渲染不出标题行（用户 2026-10-25 截图：编辑态
+        // 提示块没有「Note」标题、与渲染态结构不一致）。
+        result.push('<!--ALERTBLOCK_' + idx + '-->');
+        result.push('<!--ALERTBLOCK_' + idx + '_END-->');
       }
-      result.push('<!--ALERTBLOCK_' + idx + '-->');
-      result.push(contentLines.join('\n'));
     } else {
       result.push(line);
       i++;

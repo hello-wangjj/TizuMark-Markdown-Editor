@@ -3705,7 +3705,15 @@ body.is-resizing .side-btn {
      _wysiwygBlankCurLine 同一机制）。 */
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line {
   position: relative; /* 边缘行全高左竖条（pre::before）的定位锚 */
-  background: var(--qc-bg, var(--accent-subtle)) no-repeat;
+  /* ⚠️ 必须用 background-**image**（gradient 同色平铺）承载 --qc-bg，不能写
+     background-color/短 Hand：background-**color** 不受 background-size/position
+     约束，会铺满整个 pre（横向满编辑区宽）——遮罩盒只有 inset 内缩域（实测 1920
+     宽下盒 276→1889、底色却画到 244→1921，2026-10-30 用户截图「背景宽度超长」
+     根因；窄窗口下溢出段太短肉眼难辨所以晚发现）。嵌套层级规则（下方 lvl-N 簇）
+     一直是 gradient 图片写法，本规则对齐同口径。 */
+  background-color: transparent;
+  background-image: linear-gradient(var(--qc-bg, var(--accent-subtle)), var(--qc-bg, var(--accent-subtle)));
+  background-repeat: no-repeat;
   background-size: calc(100% - 2 * var(--wysiwyg-line-inset, 32px)) 100%;
   background-position: var(--wysiwyg-line-inset, 32px) 0;
 }
@@ -3801,6 +3809,9 @@ body.is-resizing .side-btn {
 /* S86 分级边缘距镜像（L4105-4113 同选择器同值：嵌套顶缘 36/48/60/72、底缘
    56/84/112/140/168，特异性 (0,8,1) 高于上方 (0,6,1) 条目 → 解析与 padding 一致。
    顶缘行不挂 cur-tp 类、底缘行不挂 cur-bp 类（JS 口径），故与动态类无交集。 */
+/* callout 光标行镜像（2026-10-25 统一灰带）：alert 盒边缘距与 blockquote 不同
+   （顶 14 / 底 30 / 嵌套 ±12 → 顶 26 / 底 42），特异性 (0,7,1) 压过上方通用镜像
+   （12/28/24/40）→ callout 光标行灰带高 = 文本行域（与普通引用同一口径）。 */
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-top.wysiwyg-quote-lvl-3 { --qc-tp: 36px; }
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-top.wysiwyg-quote-lvl-4 { --qc-tp: 48px; }
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-top.wysiwyg-quote-lvl-5 { --qc-tp: 60px; }
@@ -3810,6 +3821,13 @@ body.is-resizing .side-btn {
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-bottom.wysiwyg-quote-lvl-4 { --qc-pb: 112px; }
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-bottom.wysiwyg-quote-lvl-5 { --qc-pb: 140px; }
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-nested:not(.wysiwyg-callout-cursor-line).wysiwyg-block-edge-bottom.wysiwyg-quote-lvl-6 { --qc-pb: 168px; }
+/* callout 光标行镜像（2026-10-25 统一灰带）：alert 盒边缘距与 blockquote 不同
+   （顶 14 / 底 30 / 嵌套 +12 → 顶 26 / 底 42），特异性 (0,7,1) 压过上方通用镜像
+   （12/28/24/40）→ callout 光标行灰带高 = 文本行域（与普通引用同一口径）。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-block-edge-top { --qc-tp: 14px; }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-block-edge-bottom { --qc-pb: 30px; }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-quote-nested.wysiwyg-block-edge-top { --qc-tp: 26px; }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-quote-nested.wysiwyg-block-edge-bottom { --qc-pb: 42px; }
 /* 光标行高亮（2026-10-29 S94，用户截图三点：① 引用块第一行/最后一行高亮比中间行更高，
    要一致 ② 高亮颜色有深有暗，一律改灰色 ③ 高亮宽度要与内容所在引用块一致）。
    替代 2026-10-28 S90② 的「--qc-bg 覆写 18% accent tint」设计（半透明 tint 随底盒叠层/
@@ -3824,15 +3842,17 @@ body.is-resizing .side-btn {
      首/末缘行不再铺过 padding → 各行同高（S90① 块高不变式按元素盒测量，不受影响）；
    · 层序：带在底色层之上、竖条/文本之下（pre 挂 z-index:0 建层叠上下文，::after
      z-index:-1 收在 pre 内，不坠到邻行盒后）；
-   · > 标记口径不变（只在光标行显示）；callout 光标行排除：其底色/竖条为类型色
-     （--qc-bg/--qc-bar 按类型设置），维持原平色行为。
+   · > 标记口径不变（只在光标行显示）；callout 光标行同一套灰带（2026-10-25 用户
+     「引用块、提示块中正在编辑的那行都应该是灰色的，宽度 = 块宽度」——此前 callout
+     被排除、光标行整行盒铺 --qc-bg 平色（满行盒高含边缘 padding），观感 = 满宽色条；
+     现统一为灰带 + 盒底色照旧，引用/提示块同一处理逻辑、只差配色变量）。
    ⚠️ 本块不得移入下方「同身 span 渲染色重申」簇（L4400 区）：测试按该簇的空间窗口
      断言（锚点 quote-text 重申 +2400 字符内须含 inline-link 等重申规则）。 */
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-cursor-line:not(.wysiwyg-callout-cursor-line) {
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-cursor-line {
   --qc-cursor: color-mix(in srgb, var(--text-primary) 14%, var(--bg-primary));
   z-index: 0;
 }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-cursor-line:not(.wysiwyg-callout-cursor-line)::after {
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-cursor-line::after {
   content: '';
   position: absolute;
   left: calc(var(--wysiwyg-line-inset, 32px) + 24px * (var(--qtext-lvl, 1) - 1));
@@ -4400,11 +4420,57 @@ body.is-resizing .side-btn {
 .editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-quote-nested.wysiwyg-block-edge-bottom {
   padding-bottom: 42px;
 }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-callout-note { --qc-bg: var(--alert-note-bg); --qc-bar: var(--accent-color); }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-callout-tip { --qc-bg: var(--alert-tip-bg); --qc-bar: var(--color-success); }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-callout-important { --qc-bg: var(--alert-important-bg); --qc-bar: #8b5cf6; }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-callout-warning { --qc-bg: var(--alert-warning-bg); --qc-bar: var(--color-warning); }
-.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line.wysiwyg-callout-caution { --qc-bg: var(--alert-caution-bg); --qc-bar: var(--color-danger); }
+/* callout 类型色（2026-10-30 放宽到块内**所有** raw 行）：此前只在光标行
+   （.wysiwyg-callout-cursor-line）给类型色，raw 区其余行 --qc-bg 回落 accent-subtle
+   ——与渲染 alert 盒色（alert-*-bg）不一致（2026-10-30 用户图1：同一段 raw 区里
+   光标行浅蓝、邻行灰蓝，且满宽溢出时颜色差异放大）。现由 decor 引用分支给块内每行
+   挂 wysiwyg-callout-{type}（wysiwyg.js），光标行类只是其一。--qc-bar 同步放宽：
+   raw 边缘行竖条/标记行文字取类型色（与渲染盒竖条同色）。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-note { --qc-bg: var(--alert-note-bg); --qc-bar: var(--accent-color); }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-tip { --qc-bg: var(--alert-tip-bg); --qc-bar: var(--color-success); }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-important { --qc-bg: var(--alert-important-bg); --qc-bar: #8b5cf6; }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-warning { --qc-bg: var(--alert-warning-bg); --qc-bar: var(--color-warning); }
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-caution { --qc-bg: var(--alert-caution-bg); --qc-bar: var(--color-danger); }
+
+/* callout 标记行（光标停在 `> [!TYPE]`；类由 syncWysiwygActiveBlock 差分挂/撤）。
+   2026-10-25 用户截图「编辑态和渲染态不一致」：标记行源码占的正是渲染态**标题行**的位置
+   （实测 .alert-title 行盒 y 与该行行盒重合，正文段起点也随之对齐），但此前这行按普通
+   正文排版（16px / 常规字重 / 正文色）→ 盒子顶部只剩「一行裸源码」，Note 标题凭空消失。
+   按标题行排版：字号 0.95em + 700 + 类型主题色 --qc-bar（与 .alert-title 同口径，类型色
+   已由上方 .wysiwyg-callout-{type} 规则给出），`> ` 槽透明但保留 22px 占位（文本左缘
+   仍与 alert 内容对齐）→ 标题行原位不动，只有标题文字换成了用户正在编辑的源码。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-marker-line {
+  font-size: calc(var(--wysiwyg-text-size, 16px) * 0.95);
+  font-weight: 700;
+}
+/* 标题行下缘 6px = .alert-title 的 margin-bottom（实测：不加时标记行只占 26px 行盒，
+   下方正文段比渲染态整体上移 6px，块高 ±6 抖动）。末缘行不补（静态 30px 已是
+   padding-bottom 14 + margin-bottom 16 的合并值）。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-marker-line:not(.wysiwyg-block-edge-bottom) {
+  padding-bottom: 6px;
+}
+/* ⚠️ 选择器用 .wysiwyg-quote-text 类名形式（不用属性选择器 [class*=…] 形式）：
+   test/view-mode-wysiwyg 的「token 中和 + 同身 span 渲染色重申」用例按属性选择器的字面
+   串 indexOf 取锚点、再开 900/2400 字符窗口断言后续重申规则 —— 属性形式会让锚点提前
+   命中本规则，把重申簇挤出窗口（本次实测踩过一次）。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-marker-line span.wysiwyg-quote-text {
+  color: var(--qc-bar, var(--accent-color));
+}
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-marker-line span[class*="wysiwyg-quote-slot-inner"] {
+  color: transparent;
+}
+
+/* 引用/提示块光标行右内距（2026-10-25 用户截图「编辑态和渲染态不一致」之二）：光标行是
+   CM 的 pre，横向铺满整个编辑区（实测 1156px），而上下分段/渲染盒按 --wysiwyg-line-inset
+   两侧各内缩 32px 再叠加自身 padding（blockquote 20 / .alert 18）才有换行位置 —— 于是
+   同一段文字在渲染段里换行、在光标行里不换行（用户截图：源码行一路顶到盒子右缘、把
+   盒子右侧撑破）。补同样的右内距，光标行折行点 = 渲染段折行点。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-cursor-line {
+  padding-right: calc(var(--wysiwyg-line-inset, 32px) + 20px);
+}
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-callout-cursor-line {
+  padding-right: calc(var(--wysiwyg-line-inset, 32px) + 18px);
+}
 
 /* WYSIWYG 行内语法活动态（2026-10-14 用户要求，Typora 式行内）：标记字符透明 +
    零宽（2026-10-20 用户截图 demo.md：渲染态与编辑态差异巨大——旧「透明保留宽度」
@@ -4529,11 +4595,21 @@ body.is-resizing .side-btn {
 .editor-container.wysiwyg-mode .CodeMirror .wysiwyg-plain-text.wysiwyg-quote-cursor-line span[class*="wysiwyg-quote-slot-inner"] {
   color: var(--text-secondary);
 }
-/* 空引用行（2026-10-31 用户截图：光标行内容剥掉 `> ` 后为空白——如引用末尾回车出的
-   空引用行——裸露 `> ` 像破了一样）：> 字符保持透明，空引用行 = 空段落 + 左竖条，
-   与渲染态空 blockquote 一致。类由 syncWysiwygActiveBlock 差分挂/撤（输入首字符即撤）。
-   特异性 (0,7,1) 压过上方光标行显色规则 (0,6,1)。 */
+/* 空引用行（2026-10-25 用户截图「回车到新一行时，新一行没有 > 了」）：光标行剥掉 `> `
+   前缀后内容为空白时（引用/callout 内回车出的空引用行），最内层 > 仍按光标行显色。
+   此前这里把 > 置为透明（空引用行 = 空段落 + 左竖条），代价是回车后标记凭空消失——
+   上一行还看得见 >、新行突然什么都没有，用户读成「标记丢了 / 掉出引用块」。
+   现在与有内容的光标行同一口径：只显最内层一个 >（外层仍透明，见上一条 slot-inner
+   规则），空行与上一行视觉连续。类由 syncWysiwygActiveBlock 差分挂/撤，仅作语义标记
+   与测试锚点，不再改颜色。 */
 .editor-container.wysiwyg-mode .CodeMirror .wysiwyg-plain-text.wysiwyg-quote-cursor-line.wysiwyg-quote-blank-cur span[class*="wysiwyg-quote-slot-inner"] {
+  color: var(--text-secondary);
+}
+/* 引用内任务行（2026-10-30 用户图5「引用中的任务列表编辑时要跟渲染态一样」）：渲染 li
+   没有 > 标志，任务行光标态也隐藏 > 槽文字（槽保留 24px 真宽占位，checkbox/正文 x
+   不动，与渲染 li 逐像素对齐——实测 checkbox 左缘 = 盒左缘 + 48px 两侧一致）。特异性
+   与上方光标行显色规则同级、源码序在后 → 稳赢；行类由 decor 引用分支按 RE.task 命中挂。 */
+.editor-container.wysiwyg-mode .CodeMirror pre.wysiwyg-quote-line.wysiwyg-quote-task-line span[class*="wysiwyg-quote-slot-inner"] {
   color: transparent;
 }
 .editor-container.wysiwyg-mode .CodeMirror .wysiwyg-plain-text span[class*="wysiwyg-heading-hash"] {

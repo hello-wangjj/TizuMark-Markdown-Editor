@@ -289,20 +289,23 @@ function applyTizuMarkCm5Patches() {
 
 applyTizuMarkCm5Patches();
 
-// TizuMark continuelist addon 本地补丁（2026-10-28 用户要求：空嵌套引用行回车逐级退出）：
+// TizuMark continuelist addon 本地补丁（2026-10-28 用户要求：空嵌套引用行回车逐级退出；
+// 2026-10-25 补充：块中间的空引用行回车 = 续行，不得跳出——否则引用块从中间断成两块）：
 // addon/edit/continuelist.js 同样由本脚本从 node_modules 再生（不进 git），修复只存在于
 // 再生后打的补丁里——口径与 applyTizuMarkCm5Patches 一致：marker 幂等跳过；锚点消失且无
 // marker = vendor 源码变了（CM 升级等）→ 失败显式报出，绝不静默跳过。
-// 行为：emptyListRE（空行项）出口原实现一次删光整行前缀——嵌套引用（> > > 空行）直接跳出
-// 所有引用层级。现按 match[2] 里 > 数逐级弹（lvl-N → lvl-N-1，光标留本行、落新前缀之后可
-// 直接敲上级内容）；仅空 lvl-1 行完全跳出（清行 + 光标落下方新行 = 原行为）。空列表项
-// （前缀无 >，quoteLvl=0）走原分支不受影响。
+// 行为：emptyListRE（空行项）出口——
+//   ① 块中间（下一行仍是引用行）：与普通行同口径续行（replacements = 换行 + 同前缀），
+//      块不断开、引用照常延续（用户反馈：块中间空 > 行回车会把引用块断成两个）；
+//   ② 块尾（下一行不再是引用行）：lvl≥2 逐级弹（lvl-N → lvl-N-1，光标留本行、落新前缀
+//      之后可直接敲上级内容）；仅空 lvl-1 行完全跳出（清行 + 光标落下方新行 = 原行为）。
+//   空列表项（前缀无 >，quoteLvl=0）走原分支不受影响。
 function applyTizuMarkContinuelistPatch() {
   const dest = path.join(LIB, 'codemirror', 'addon', 'edit', 'continuelist.js');
   let code = fs.readFileSync(dest, 'utf8');
   const patches = [
     {
-      name: '空嵌套引用行回车逐级退出（lvl-N → lvl-N-1，无上级才跳出）',
+      name: '空嵌套引用行回车：块中间续行 / 块尾逐级退出',
       marker: 'var quoteLvl = (match[2].match(/>/g) || []).length;',
       from: `        if (endOfQuote || endOfList) cm.replaceRange("", {
           line: pos.line, ch: 0
@@ -311,6 +314,37 @@ function applyTizuMarkContinuelistPatch() {
         });
         replacements[i] = "\\n";`,
       to: `        if (endOfQuote || endOfList) {
+          // 2026-10-25 用户反馈：块中间的空引用行（下一行仍是引用行）回车 = 续行——
+          // 与普通引用行同一口径（换行 + 同前缀），块不断开。只看紧邻下一行是否引用行
+          // （块中间隔空行的 "> 下文" 本就是两个独立块，不在保护范围）。
+          // 2026-10-25 追加（用户反馈「块尾回车跳不出引用块、下面闪出一串 > 又消失」）：
+          // 若光标行之下直到块尾的全部引用行都是空引用行，视觉上光标就站在块尾——但紧邻
+          // 下一行是空 > 会让「续行」口径永远命中：每轮回车在光标下方插一条新 > 行（被
+          // WYSIWYG 底部遮罩吞掉不可见），下一行永远是引用行 → 续行死循环、永远跳不出。
+          // 故先扫光标行之下的引用行：全是空 > → 按块尾口径跳出，并把这批不可见的续行
+          // 垃圾一并删掉（留着块底多一排空行，跳出后脱离遮罩又变成裸露源码）；只要其中
+          // 有一条带内容的引用行，就仍是真「块中间」，维持续行口径不拆块。
+          var nextLine = cm.getLine(pos.line + 1);
+          var inQuoteMiddle = typeof nextLine === "string" && /^\\s*>/.test(nextLine);
+          if (inQuoteMiddle) {
+            var onlyEmptyBelow = true;
+            var blockEnd = pos.line;
+            for (var ln = pos.line + 1; ; ln++) {
+              var ql = cm.getLine(ln);
+              if (typeof ql !== "string" || !/^\\s*>/.test(ql)) break;
+              blockEnd = ln;
+              if (ql.replace(/^\\s*>[> \\t]*/, "").trim() !== "") { onlyEmptyBelow = false; break; }
+            }
+            if (onlyEmptyBelow) {
+              if (blockEnd > pos.line) {
+                cm.replaceRange("", { line: pos.line + 1, ch: 0 }, { line: blockEnd + 1, ch: 0 });
+              }
+              inQuoteMiddle = false;
+            } else {
+              replacements[i] = "\\n" + match[1] + match[2] + match[5];
+            }
+          }
+          if (!inQuoteMiddle) {
           // 2026-10-28 用户要求：空嵌套引用行回车 = 逐级退出（lvl-N → lvl-N-1，光标留在
           // 本行、落在新前缀之后可直接敲上级内容）；仅无上级（空 lvl-1 行）才完全跳出
           // 引用（原行为：清行、光标落下方新行）。原实现空引用行一次删光全部 > 直接跳出
@@ -333,6 +367,7 @@ function applyTizuMarkContinuelistPatch() {
               line: pos.line, ch: pos.ch + 1
             });
             replacements[i] = "\\n";
+          }
           }
         } else {
           replacements[i] = "\\n";

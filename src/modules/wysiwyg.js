@@ -1997,7 +1997,12 @@
       const cm = this.cm;
       if (!cm || !isFinite(lineNo) || lineNo < 0 || lineNo >= cm.lineCount()) return null;
       const line = cm.getLine(lineNo);
-      const m = line.match(/^(\s*(?:[-*+]|\d{1,9}[.)])\s+\[)([ xX])(\])/);
+      // 2026-10-25 扩引用前缀：引用/提示块内的任务行（`> - [x] 正文`）也挂了
+      // wysiwyg-task-prefix 槽（_wysiwygApplyActiveDecor 引用分支），wrapper capture 的
+      // 勾选点击会落到这里——原正则只认行首任务标记，引用行返回 null → 点击放行、
+      // 勾选无效。`(?:>[ \t]?)*` 吃逐层 `> `（缩进层与 2026-10-28 quoteMarkerZoneEnd
+      // 的逐层口径一致），其后才是列表标记。
+      const m = line.match(/^(\s*(?:>[ \t]?)*\s*(?:[-*+]|\d{1,9}[.)])\s+\[)([ xX])(\])/);
       if (!m) return null;
       cm.replaceRange(m[2] === ' ' ? 'x' : ' ',
         { line: lineNo, ch: m[1].length }, { line: lineNo, ch: m[1].length + 1 }, '+wysiwygTask');
@@ -3191,6 +3196,14 @@
               cm.removeLineClass(h, 'text', 'wysiwyg-quote-line');
               cm.removeLineClass(h, 'text', 'wysiwyg-quote-nested');
               for (let n = 2; n <= 6; n++) cm.removeLineClass(h, 'text', 'wysiwyg-quote-lvl-' + n); // 嵌套层级类随 nested 同撤
+              // callout 类型行类 + 引用任务行标记（2026-10-30）：随 quote-line 同撤
+              //（decor 引用分支先清后挂、同 tick 内净效果一致，无 2026-10-25 那次的闪烁
+              // 问题——那次 decor 不重挂类型类才撤不得；wysiwyg-callout-cursor-line
+              // 专用类仍由 sync 差分管，不在此撤）。
+              for (const t of ['note', 'tip', 'important', 'warning', 'caution']) {
+                cm.removeLineClass(h, 'text', 'wysiwyg-callout-' + t);
+              }
+              cm.removeLineClass(h, 'text', 'wysiwyg-quote-task-line');
               // 注：callout 光标行类（wysiwyg-callout-cursor-line + wysiwyg-callout-{type}）不在此撤——由
               // syncWysiwygActiveBlock 每 tick 现算挂/撤（同 wysiwyg-quote-cursor-line 机制）：
               // decor 先清后挂会在 sync 现算**之后**跑（setWysiwygActiveBlock 内部），刚一挂上
@@ -3424,15 +3437,28 @@
         // 正文 → 预览字体 + 次级色。行类 wysiwyg-quote-line/nested 管淡色背景盒与
         // 边缘/嵌套 padding；> 字符默认透明，仅光标行可见（wysiwyg-quote-cursor-line，
         // cursorActivity 管理，_wysiwygQuoteCurLine）。
+        // callout 类型（2026-10-30 用户图1）：类型色 --qc-bg/--qc-bar 须落到块内**所有**
+        // raw 行（CSS 类型选择器已放宽到非光标行，见 styles.css 同名规则）——此前只有光标行
+        // 有类型色，raw 区其余行回落 accent-subtle，同一盒内深浅不一。从块首行 `> [!TYPE]` 现判。
+        const calloutM = /^\s*(?:>[ \t]?)*\[!([A-Za-z]+)\]/.exec(cm.getLine(b.start) || '');
+        const calloutType = calloutM
+          && ['note', 'tip', 'important', 'warning', 'caution'].includes(calloutM[1].toLowerCase())
+          ? calloutM[1].toLowerCase() : null;
         for (let lineNo = b.start; lineNo < b.end && lineNo < cm.lineCount(); lineNo++) {
           const line = cm.getLine(lineNo);
-          if (!line || line.trim() === '') continue; // callout 内空行不装饰
+          if (!line) continue;
+          // 空引用行（`>` 或 `> `，2026-10-30 用户图3）也挂行类：底色盒在 raw 区连续 +
+          // callout 类型色不断档；纯空行维持原「不装饰」口径。
+          const blankQuote = line.trim() === '';
+          if (blankQuote && !/^\s*>/.test(line)) continue;
           const qm = /^(\s*(?:>[ \t]?)+)/.exec(line);
           if (!qm) continue;
           // 2026-10-28 用户要求：嵌套引用光标行只显一个 >（当前编辑的引用块 = 最内层），
           // 外层每层的 > 不再重复显示。最内层槽额外挂 wysiwyg-quote-slot-inner 标记，
           // 光标行显色规则（styles.css）只认这个标记 → 单层行行为不变（唯一槽即最内层）。
           const lvlCount = (qm[1].match(/>/g) || []).length;
+          let qTask = null;
+          if (!blankQuote) {
           let level = 0, pos = 0;
           while (pos < qm[1].length) {
             const gt = line.indexOf('>', pos);
@@ -3444,15 +3470,50 @@
             pos = end;
           }
           add(lineNo, qm[1].length, line.length, 'wysiwyg-quote-text');
+          // —— 引用内嵌套任务列表（2026-10-25 用户截图「引用块嵌套任务列表还是显示源码，
+          //    参考任务列表的实现方式」）：引用行此前只装饰 `> ` 槽，行内 `- [x] ` 段无任何
+          //    装饰 → 光标行（源码行）裸露「> - [x] 正文」，而独立任务列表块走上方列表分支、
+          //    复选框恒渲染。剥掉 `> ` 前缀后的剩余文本按 RE.task 匹配时，挂与列表分支
+          //    **同一组**装饰（位置整体右移 prefixLen）：bullet 单字符 → 24px 槽（::before
+          //    画复选框，恒渲染、可点），「空格 + [ ]」→ 零宽槽。24px 只钉单字符的原因同
+          //    列表分支（CM5 token 拆分下整段会拆成两个槽）。几何上天然对齐渲染态：
+          //    `> ` 槽 24px = blockquote 缩进（border 4 + padding 20），task 槽 24px =
+          //    li 复选框 16 + margin 8 → 正文落 48px，与渲染 li 正文同位。非光标行被
+          //    分段遮罩盖住，装饰无碍；光标离开后 span 随文本保留，重算时自动重建。
+          //    点击勾选走 wrapper 全局委托 _ensureWysiwygTaskBoxClick（引用行同样命中），
+          //    回写靠 _wysiwygToggleTaskLine 的引用前缀扩展。
+          //    2026-10-30 用户图5：行命中 RE.task 时另挂 wysiwyg-quote-task-line 行类，
+          //    CSS 光标态隐藏 `>` 槽文字（渲染 li 无 >，槽保留 24px 占位、checkbox 不动）。
+          const restAfterQuote = line.slice(qm[1].length);
+          qTask = RE.task.exec(restAfterQuote);
+          if (qTask) {
+            const qOff = qm[1].length;
+            const qBulletAt = qOff + qTask[1].length;
+            const qBoxAt = qBulletAt + 1 + qTask[3].length;
+            add(lineNo, qBulletAt, qBulletAt + 1,
+              'wysiwyg-task-prefix' + (/[xX]/.test(line.charAt(qBoxAt + 1)) ? ' checked' : ''));
+            add(lineNo, qBulletAt + 1, qBoxAt + 3, 'wysiwyg-task-box-zero');
+          }
+          }
           const h = cm.getLineHandle(lineNo);
           if (h) {
             cm.addLineClass(h, 'text', 'wysiwyg-quote-line');
-            if (level >= 2) cm.addLineClass(h, 'text', 'wysiwyg-quote-nested');
+            if (lvlCount >= 2) cm.addLineClass(h, 'text', 'wysiwyg-quote-nested');
             // 嵌套层级类（2026-10-28）：中间行光标行按层级画渲染同构的逐层底色/全高竖条
             // （styles.css wysiwyg-quote-lvl-N 规则）。先清后挂：层级升降（增/删一层 >）
             // 须换掉旧类；封顶 6（同列表 wysiwyg-list-lvl-N 口径）。
             for (let n = 2; n <= 6; n++) cm.removeLineClass(h, 'text', 'wysiwyg-quote-lvl-' + n);
-            if (level >= 2) cm.addLineClass(h, 'text', 'wysiwyg-quote-lvl-' + Math.min(level, 6));
+            if (lvlCount >= 2) cm.addLineClass(h, 'text', 'wysiwyg-quote-lvl-' + Math.min(lvlCount, 6));
+            // callout 类型行类（2026-10-30）：先清后挂——类型改写（[!NOTE]→[!TIP]）或退化
+            // 为普通引用时换装。与 sync 光标行差分（_setWysiwygCalloutCurClass）叠加不冲突：
+            // 本处同 tick 后跑、净效果一致，且不动 wysiwyg-callout-cursor-line 专用类。
+            for (const t of ['note', 'tip', 'important', 'warning', 'caution']) {
+              cm.removeLineClass(h, 'text', 'wysiwyg-callout-' + t);
+            }
+            if (calloutType) cm.addLineClass(h, 'text', 'wysiwyg-callout-' + calloutType);
+            // 引用内任务行标记（2026-10-30 图5）：先清后挂（行改写离开任务语法须撤）。
+            cm.removeLineClass(h, 'text', 'wysiwyg-quote-task-line');
+            if (qTask) cm.addLineClass(h, 'text', 'wysiwyg-quote-task-line');
             // callout 光标行类（2026-10-25 分段口径）不再在此挂：激活时 _wysiwygApplyActiveDecor
             // 的 curLine 是旧光标（未落目标行），判不准 → 改由 syncWysiwygActiveBlock 现算
             // 路径 _setWysiwygCalloutCurClass 管理（与 _wysiwygQuoteCurLine 同机制）。
@@ -3491,8 +3552,17 @@
           try {
             // 块内空行（松散列表项间空行等）不挂：本类行高 1.7 特异性高于空行塌缩规则
             //（.CodeMirror .cm-wysiwyg-blank .CodeMirror-line 12px），挂了会把空行撑回
-            // 全高 → 列表编辑态「多出来很多空白行」（2026-10-14 用户截图）
-            if ((cm.getLine(lineNo) || '').trim() === '') continue;
+            // 全高 → 列表编辑态「多出来很多空白行」（2026-10-14 用户截图）。
+            // 空引用行例外（2026-10-30 用户图3）：引用分支已给它挂 quote-line/类型行类
+            // （底色盒连续），这里只补**跟踪**（不挂 wysiwyg-plain-text，保空行塌缩高度）
+            // → 离开块时清理路径能把这些行类撤净。
+            if ((cm.getLine(lineNo) || '').trim() === '') {
+              if (/^\s*>/.test(cm.getLine(lineNo) || '')) {
+                const blankH = cm.getLineHandle(lineNo);
+                if (blankH) this._wysiwygPlainLines.push(blankH);
+              }
+              continue;
+            }
             const h = cm.getLineHandle(lineNo);
             if (h) {
               cm.addLineClass(h, 'text', 'wysiwyg-plain-text');
@@ -3897,10 +3967,11 @@
       //（幂等值差：值未变即 no-op，不触发行重渲染）
       if (nextQuote != null && nextQuote === prevQuote) this._setWysiwygQuoteCurPad(nextQuote, true, ab);
       this._wysiwygQuoteCurLine = nextQuote;
-      // —— 引用光标行「空内容」类（2026-10-31 用户截图：空引用行裸露 `> `，像破了一样）：
-      //    光标行剥掉 `> ` 前缀后内容为空白时给 pre 挂 wysiwyg-quote-blank-cur，CSS 保持
-      //    > 字符透明 → 空引用行 = 空段落 + 左竖条（与渲染态空 blockquote 一致）。输入
-      //    首字符后 cursorActivity 重判即撤（差分挂/撤，同上方 quote-cursor-line 机制）。
+      // —— 引用光标行「空内容」类（2026-10-25 用户截图「回车到新一行时，新一行没有 > 了」）：
+      //    光标行剥掉 `> ` 前缀后内容为空白时给 pre 挂 wysiwyg-quote-blank-cur（语义标记，
+      //    供 CSS/测试定位；**不再改 > 的显色**——空引用行与有内容的光标行同一口径，只显
+      //    最内层一个 >，回车前后视觉连续）。输入首字符后 cursorActivity 重判即撤
+      //    （差分挂/撤，同上方 quote-cursor-line 机制）。
       const prevQBlank = this._wysiwygQuoteBlankCurLine;
       let nextQBlank = null;
       if (nextQuote != null && isBlank(stripQuotePrefix((this.cm.getLine(nextQuote) || '')))) nextQBlank = nextQuote;
@@ -3917,6 +3988,19 @@
       if (prevCallout != null && prevCallout !== nextQuote) this._setWysiwygCalloutCurClass(prevCallout, false);
       if (nextCallout != null && nextQuote !== prevCallout) this._setWysiwygCalloutCurClass(nextQuote, true, nextCallout);
       this._wysiwygCalloutCurLine = nextCallout ? nextQuote : null;
+      // —— callout「标记行」类（2026-10-25 用户截图「编辑态和渲染态不一致」）：光标停在
+      //    `> [!NOTE]` 标记行时，这一行源码占的正是渲染态 **标题行** 的位置（实测：标记行
+      //    行盒 y 与 .alert-title 行盒重合、正文段起点也随之对齐），但此前该行按普通正文
+      //    排版（16px/常规字重/正文色）→ 用户看到的是「盒子顶部一行裸源码，Note 标题没了」。
+      //    给 pre 挂 wysiwyg-callout-marker-line，CSS 把这行按标题行排版（0.95em / 700 /
+      //    类型主题色 --qc-bar、`> ` 槽透明但保留 22px 占位）→ 标题行仍在原位，只是标题
+      //    文字换成了用户正在编辑的源码。与上方 callout 光标行类同机制（差分挂/撤，行号
+      //    失效由 prev/next 差分兜底）。
+      const prevMarker = this._wysiwygCalloutMarkerLine;
+      const nextMarker = (nextCallout && nextQuote != null && ab && nextQuote === ab.start) ? nextQuote : null;
+      if (prevMarker != null && prevMarker !== nextMarker) this._setWysiwygCurLineClass(prevMarker, 'wysiwyg-callout-marker-line', false);
+      if (nextMarker != null && nextMarker !== prevMarker) this._setWysiwygCurLineClass(nextMarker, 'wysiwyg-callout-marker-line', true);
+      this._wysiwygCalloutMarkerLine = nextMarker;
       // —— 行内标记光标行类（2026-07-13 用户反馈：①鼠标选中一段文字时编辑态源码消失
       //    ——active-line addon 对**非空选区清掉全部活动行**（updateActiveLines 跳过非空
       //    range），选区期间光标行回渲染外观；②demo.md 的 <ins> 行光标离开整列表才回
@@ -4030,19 +4114,25 @@
     // wysiwyg-callout-cursor-line（接管引用行默认盒、切换 callout 配色）+
     // wysiwyg-callout-{type}（note/tip/important/warning/caution 五类，色板经
     // --qc-bg/--qc-bar 变量与渲染/分段 .alert 盒同源——CSS 按类型设两变量，槽
-    // ::before 与 pre::before 竖条共用）。撤类时不知道旧类型，一把移除全部五类
-    //（幂等，杜绝残留）。
+    // ::before 与 pre::before 竖条共用）。
+    // 2026-10-30 职责调整：类型类已放宽到块内**所有** raw 行（decor 引用分支统一
+    // 先清后挂）。本方法只保证**光标行**类型即时正确（[!NOTE]→[!TIP] 改写时旧类
+    // 不残留——两类型类并存时 CSS 按源码序取后者，tip→note 会取错色）；OFF 只撤
+    // cursor-line 专用类、**不撤类型类**——setWysiwygActiveBlock 在 idx 未变时提前
+    // 返回、decor 不重跑，这里撤掉会让纯光标移动路径在前光标行上出现类型色缺口。
+    // 残留无害：CSS 类型选择器全部要求 .wysiwyg-quote-line 同在，decor/cleanup
+    // 的先清后挂兜底。
     _setWysiwygCalloutCurClass(n, on, type) {
       if (on) {
-        if (type) this._setWysiwygCurLineClass(n, 'wysiwyg-callout-' + type, true);
-        this._setWysiwygCurLineClass(n, 'wysiwyg-callout-cursor-line', true);
-      } else {
-        this._setWysiwygCurLineClass(n, 'wysiwyg-callout-cursor-line', false);
         this._setWysiwygCurLineClass(n, 'wysiwyg-callout-note', false);
         this._setWysiwygCurLineClass(n, 'wysiwyg-callout-tip', false);
         this._setWysiwygCurLineClass(n, 'wysiwyg-callout-important', false);
         this._setWysiwygCurLineClass(n, 'wysiwyg-callout-warning', false);
         this._setWysiwygCurLineClass(n, 'wysiwyg-callout-caution', false);
+        if (type) this._setWysiwygCurLineClass(n, 'wysiwyg-callout-' + type, true);
+        this._setWysiwygCurLineClass(n, 'wysiwyg-callout-cursor-line', true);
+      } else {
+        this._setWysiwygCurLineClass(n, 'wysiwyg-callout-cursor-line', false);
       }
     },
 
@@ -5433,6 +5523,12 @@
                   cm.removeLineClass(h, 'text', 'wysiwyg-quote-line');
                   cm.removeLineClass(h, 'text', 'wysiwyg-quote-nested');
                   for (let n = 2; n <= 6; n++) cm.removeLineClass(h, 'text', 'wysiwyg-quote-lvl-' + n); // 嵌套层级类随 nested 同撤
+                  // callout 类型行类 + 引用任务行标记（2026-10-30）：随 quote-line 同撤
+                  //（wysiwyg-callout-cursor-line 专用类仍由 sync 差分管，不在此撤）
+                  for (const t of ['note', 'tip', 'important', 'warning', 'caution']) {
+                    cm.removeLineClass(h, 'text', 'wysiwyg-callout-' + t);
+                  }
+                  cm.removeLineClass(h, 'text', 'wysiwyg-quote-task-line');
                   // 注：callout 光标行类（wysiwyg-callout-cursor-line + wysiwyg-callout-{type}）不在此撤——
                   // 同下款 wysiwyg-quote-cursor-line 口径：防抖重渲后 pre 按行对象重建自动带回，
                   // 撤掉则用户停手（无 cursorActivity 跟随）时光标行 callout 配色丢（2026-10-25

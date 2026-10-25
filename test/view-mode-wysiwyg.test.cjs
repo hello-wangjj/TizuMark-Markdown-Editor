@@ -541,10 +541,14 @@ test('引用行 Backspace·Delete 守卫接线 + 字面块放行 + 空白点击�
   assert.match(wsrc, /_ensureWysiwygBlankClickGuard\(\) \{/, '缺少 _ensureWysiwygBlankClickGuard');
   assert.match(wsrc, /this\._ensureWysiwygListKeyGuard\(\);\n        this\._ensureWysiwygBlankClickGuard\(\);/,
     '_ensureWysiwygBlankClickGuard 未随模式进入接线');
-  // 空引用行 `>` 保持透明（CSS）：blank-cur 类由 syncWysiwygActiveBlock 差分挂/撤
+  // 空引用行 `>` 仍显色（CSS）：blank-cur 类由 syncWysiwygActiveBlock 差分挂/撤，
+  // 2026-10-25 用户截图「回车到新一行时，新一行没有 > 了」→ 空引用行与有内容的光标行
+  // 同一口径，只显最内层一个 >（此前此处为 transparent，回车后标记凭空消失）。
   assert.ok(wsrc.indexOf('wysiwyg-quote-blank-cur') >= 0, '缺空引用行 blank-cur 类挂/撤逻辑');
-  assert.match(css, /wysiwyg-quote-cursor-line\.wysiwyg-quote-blank-cur span\[class\*="wysiwyg-quote-slot-inner"\] \{[^}]*color: transparent;/,
-    'CSS 缺空引用行 > 透明规则（wysiwyg-quote-blank-cur）');
+  assert.match(css, /wysiwyg-quote-blank-cur span\[class\*="wysiwyg-quote-slot-inner"\] \{[^}]*color: var\(--text-secondary\);/,
+    'CSS 缺空引用行 > 显色规则（wysiwyg-quote-blank-cur）：透明会让回车出的空引用行丢掉 >');
+  assert.ok(!/wysiwyg-quote-blank-cur span\[class\*="wysiwyg-quote-slot-inner"\] \{[^}]*color: transparent;/.test(css),
+    '空引用行 > 不应被置为透明（回归到「回车后新行没有 >」）');
   // 空有序项 caret 例外（2026-10-31 用户截图：`1. ` 正文空白时行尾光标不可见）
   assert.ok(wsrc.indexOf("' wysiwyg-ol-space-empty'") >= 0, '空有序项未挂 ol-space-empty 例外类');
   assert.match(css, /wysiwyg-ol-space-empty \{[^}]*width: 1px;/,
@@ -1892,8 +1896,13 @@ test('编辑态排版对齐渲染态（2026-10-14 用户截图反馈）：plain-
   // 挂了会把空行撑回全高 → 列表编辑态「多出来很多空白行」
   const plainLoop = wsrc.indexOf('this._wysiwygPlainLines = [];');
   assert.ok(plainLoop > 0, '缺 plain-text 挂行循环');
-  assert.match(wsrc.slice(plainLoop, plainLoop + 700),
-    /\(cm\.getLine\(lineNo\) \|\| ''\)\.trim\(\) === ''\) continue/, 'plain-text 挂行循环未跳过块内空行');
+  // 2026-10-30 空引用行例外（图3）：空行分支改为 if 块——空引用行只补跟踪（_wysiwygPlainLines
+  // push，清理路径撤净行类）、不挂 plain-text（挂了会把空行撑回全高 → 列表编辑态多空白行）
+  const blankSkip = wsrc.slice(plainLoop, plainLoop + 900)
+    .match(/\(cm\.getLine\(lineNo\) \|\| ''\)\.trim\(\) === ''\) \{([\s\S]{0,400}?)\n {12}\}/);
+  assert.ok(blankSkip, 'plain-text 挂行循环未跳过块内空行');
+  assert.doesNotMatch(blankSkip[1], /wysiwyg-plain-text/, '空行分支不得挂 wysiwyg-plain-text（会撑回全高）');
+  assert.match(blankSkip[1], /_wysiwygPlainLines\.push/, '空引用行须补跟踪（离开块时清理路径能撤净行类）');
   // ② gfm token 色中和：标题 cm-header（蓝）/列表 cm-variable-2（海军蓝）/引用 cm-quote（绿）
   // 等 token span 嵌在渲染化 span 内，内层 color 压过继承 → 编辑态文字发蓝。
   // plain-text 行内所有 cm-* span 统一 color:inherit
@@ -2372,7 +2381,8 @@ test('token 中和 + 同身 span 渲染色重申（CM5 合并同区间 marker �
   // 必须以 (0,5,1) 同前缀重申「有渲染色设计」的类（规则序在中和之后）。
   const oIdx = css.indexOf('class*="wysiwyg-quote-text"]');
   assert.ok(oIdx > 0, '缺同身 span 渲染色重申（引用正文的 --text-secondary 会被中和规则洗成主色）');
-  const oblk = css.slice(Math.max(0, oIdx - 900), oIdx + 2400);
+  // 2026-10-30：锚点后新增引用任务行 > 槽隐藏规则（约 +370 字符），窗口 2400 → 3200
+  const oblk = css.slice(Math.max(0, oIdx - 900), oIdx + 3200);
   assert.match(oblk, /wysiwyg-plain-text span\[class[*]="wysiwyg-quote-text"\][\s\S]{0,120}color: var\(--text-secondary\);/,
     '引用正文次级色未用 (0,5,1) 重申');
   // 2026-10-20：> 槽同身（cm-quote + slot）须重申透明（默认只在光标行显示），
@@ -2756,8 +2766,9 @@ test('不跳顶修复⑤（2026-10-21）：ensure-vendor 再生 vendor 后重打
   assert.match(vendor, /function applyTizuMarkCm5Patches\(\) \{/,
     'ensure-vendor 缺 CM5 补丁重打步骤（vendor 再生会抹掉不跳顶修复）');
   // 补丁调用顺序：CM5 核心 → continuelist addon → vendor 同步完成（2026-10-28 新增 continuelist
-  // 逐级退出补丁，须同在同步完成前重打，否则 npm install 抹掉修复）
-  assert.match(vendor, /applyTizuMarkCm5Patches\(\);[\s\S]{0,4000}?applyTizuMarkContinuelistPatch\(\);\s*\n\s*console\.log\('\[ensure-vendor\] vendor 同步完成/,
+  // 逐级退出补丁，须同在同步完成前重打，否则 npm install 抹掉修复；窗口 8000 = 补丁体含
+  // 块尾跳出逻辑后已逾 4000，S106 曾撑爆）
+  assert.match(vendor, /applyTizuMarkCm5Patches\(\);[\s\S]{0,8000}?applyTizuMarkContinuelistPatch\(\);\s*\n\s*console\.log\('\[ensure-vendor\] vendor 同步完成/,
     'ensure-vendor 的 CM5/continuelist 补丁步骤未在 vendor 同步完成前调用');
   // 两个补丁项的幂等 marker（已打则跳过；锚点丢失则 exit 1，绝不静默）
   assert.match(vendor, /marker: 'if \(rendered\.has\(line\)\) return;'/,
@@ -3235,9 +3246,13 @@ test('S83 引用/提示块活动态「渲染分段 + 光标行源码」：非光
   assert.ok(!/\.alert-note \{\s*background: linear-gradient/.test(css), '渲染态 .alert-note 仍是渐变底色（编辑态无法与渲染态完全一致）');
   // ⑦b 光标行类型类改名 wysiwyg-callout-{type}（旧 alert-{type} 让 pre 直接命中 .alert-*
   //     渲染规则：1px inset 内环铺满整行 = 「灰色框」规则冲突根源）
-  assert.ok((css.match(/wysiwyg-callout-cursor-line\.wysiwyg-callout-\w+ \{\s*--qc-bg: var\(--alert-\w+-bg\);\s*--qc-bar:/g) || []).length >= 5, 'callout 光标行五色未收口 --qc-bg/--qc-bar 变量');
+  // 2026-10-30 类型色放宽到块内所有 raw 行（图1）：选择器不再要求 callout-cursor-line 前缀
+  assert.ok((css.match(/wysiwyg-quote-line\.wysiwyg-callout-\w+ \{\s*--qc-bg: var\(--alert-\w+-bg\);\s*--qc-bar:/g) || []).length >= 5, 'callout 五色未收口 --qc-bg/--qc-bar 变量（须落到块内所有 raw 行）');
   assert.doesNotMatch(css, /wysiwyg-callout-cursor-line\.alert-\w+/, '光标行类型类仍是 alert-{type}（pre 会命中 .alert-* 渲染规则）');
-  assert.match(css, /pre\.wysiwyg-quote-line \{[^}]*background: var\(--qc-bg, var\(--accent-subtle\)\) no-repeat;/, '光标行背景未走 --qc-bg 变量（callout 五类与引用默认无法收口单一来源）');
+  // 2026-10-30（图1 根因）：--qc-bg 是背景「色」、不受 background-size/position 约束，
+  // 会铺满整个 pre（横向满编辑区宽）→ 必须经 gradient「图」承载，底色才收得进盒
+  assert.match(css, /pre\.wysiwyg-quote-line \{[^}]*background-image: linear-gradient\(var\(--qc-bg, var\(--accent-subtle\)\), var\(--qc-bg, var\(--accent-subtle\)\)\);/, '光标行底色未走 --qc-bg 渐变图（背景色会无视 size/position 铺满全宽）');
+  assert.ok(!/pre\.wysiwyg-quote-line \{[^}]*background:\s*var\(--qc-bg/.test(css), 'quote-line 底色不得用 background-color/短手（背景色不受 background-size 约束、铺满全宽）');
   // ⑦c 边缘行全高左竖条（pre::before）：顶缘行铺满 100%、末缘行收在盒底（100%-16px margin）
   assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-block-edge-top::before \{[^}]*height: 100%;[^}]*var\(--qc-bar, var\(--accent-color\)\)/, '缺顶缘行全高竖条（pre::before）');
   assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-block-edge-bottom::before \{[^}]*height: calc\(100% - 16px\);/, '缺末缘行竖条收盒底（100%-16px margin）');
@@ -3326,8 +3341,9 @@ test('S85 嵌套引用光标行 = 渲染嵌套盒同构 + IME 组合竖排修复
   assert.match(css, /\.wysiwyg-ol-marker \{[\s\S]{0,2500}?white-space: nowrap;/, '同族先例 .wysiwyg-ol-marker nowrap 不得回退');
   assert.match(wys, /RE\.quote\.test\(text\) \? 'wysiwyg-ime-quote' : null/, 'wysiwyg.js _wysiwygImeCompositionStart 缺引用行组合期挂类');
   assert.match(wys, /_wysiwygImeCompositionEnd\(\) \{[\s\S]{0,300}?_wysiwygImeLineCls/, 'wysiwyg.js compositionend 未统一摘类');
-  // ③ JS：lvl-N 行类挂/撤（decor 按 > 数挂、封顶 6；两处引用行类清算随 nested 同撤）
-  assert.match(wys, /wysiwyg-quote-lvl-' \+ Math\.min\(level, 6\)/, 'wysiwyg.js decor 缺 lvl-N 行类挂载');
+  // ③ JS：lvl-N 行类挂/撤（decor 按 > 数挂、封顶 6；两处引用行类清算随 nested 同撤）。
+  //    2026-10-30 变量 level → lvlCount（空引用行跳过 span 循环后行类仍需层级数）
+  assert.match(wys, /wysiwyg-quote-lvl-' \+ Math\.min\(lvlCount, 6\)/, 'wysiwyg.js decor 缺 lvl-N 行类挂载');
   const lvlRmCount = (wys.match(/wysiwyg-quote-lvl-' \+ n/g) || []).length;
   assert.ok(lvlRmCount >= 3, 'wysiwyg.js lvl-N 先清后挂/清算不足 3 处（decor + 两处行类清算），实际 ' + lvlRmCount);
   // ④ 驱动回归接线
@@ -3581,14 +3597,18 @@ test('S92 嵌套空行弹级到最外层后接缝着色（2026-10-29 用户截�
 test('S94 引用光标行高亮 = 统一实色灰带（2026-10-29 用户截图：首/末行更高、有深有暗、宽度与内容所在盒不一致）', () => {
   const css = fs.readFileSync(path.join(ROOT, 'src', 'styles.css'), 'utf8');
   const driver = fs.readFileSync(path.join(ROOT, 'scripts', 'wysiwyg-browser-check.mjs'), 'utf8');
-  // ① 灰带 = 光标行（非 callout）pre::after 实色带：色 --qc-cursor（14% 文字色×底色，
-  //   不透明 → 不随底色合成出深浅差）、左/右 = 最内层盒缘（32+24×(N−1) / 32+20×(N−1)）、
+  // ① 灰带 = 光标行 pre::after 实色带（2026-10-25 用户要求引用/提示块统一：callout 不再
+  //   排除——此前 callout 光标行整行盒铺 --qc-bg 平色含边缘 padding = 满宽色条）：
+  //   色 --qc-cursor（14% 文字色×底色，不透明 → 不随底色合成出深浅差）、
+  //   左/右 = 最内层盒缘（32+24×(N−1) / 32+20×(N−1)）、
   //   顶/高 = 文本行域（--qc-tp/--qc-pb 镜像行 padding → 首/末/中间行同高）、
   //   z-index:-1 + pre z-index:0（带在底色上、竖条/文本下）。
-  assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-quote-cursor-line:not\(\.wysiwyg-callout-cursor-line\) \{\s*--qc-cursor: color-mix\(in srgb, var\(--text-primary\) 14%, var\(--bg-primary\)\);\s*z-index: 0;\s*\}/,
+  assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-quote-cursor-line \{\s*--qc-cursor: color-mix\(in srgb, var\(--text-primary\) 14%, var\(--bg-primary\)\);\s*z-index: 0;\s*\}/,
     'styles.css 缺光标行 --qc-cursor 实色灰定义 + z-index:0 层叠上下文');
-  assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-quote-cursor-line:not\(\.wysiwyg-callout-cursor-line\)::after \{\s*content: '';\s*position: absolute;\s*left: calc\(var\(--wysiwyg-line-inset, 32px\) \+ 24px \* \(var\(--qtext-lvl, 1\) - 1\)\);\s*right: calc\(var\(--wysiwyg-line-inset, 32px\) \+ 20px \* \(var\(--qtext-lvl, 1\) - 1\)\);\s*top: var\(--qc-tp, 0px\);\s*height: calc\(100% - var\(--qc-tp, 0px\) - var\(--qc-pb, 0px\)\);\s*background: var\(--qc-cursor\);\s*z-index: -1;\s*pointer-events: none;\s*\}/,
+  assert.match(css, /pre\.wysiwyg-quote-line\.wysiwyg-quote-cursor-line::after \{\s*content: '';\s*position: absolute;\s*left: calc\(var\(--wysiwyg-line-inset, 32px\) \+ 24px \* \(var\(--qtext-lvl, 1\) - 1\)\);\s*right: calc\(var\(--wysiwyg-line-inset, 32px\) \+ 20px \* \(var\(--qtext-lvl, 1\) - 1\)\);\s*top: var\(--qc-tp, 0px\);\s*height: calc\(100% - var\(--qc-tp, 0px\) - var\(--qc-pb, 0px\)\);\s*background: var\(--qc-cursor\);\s*z-index: -1;\s*pointer-events: none;\s*\}/,
     'styles.css 缺灰带 ::after 规则（最内层盒宽 × 文本行域、带下层序、无事件穿透）');
+  assert.ok(!/wysiwyg-quote-cursor-line:not\(\.wysiwyg-callout-cursor-line\)::after/.test(css),
+    '灰带不得再排除 callout（提示块光标行统一灰带，回退 = 满宽平色条）');
   // ② --qc-tp/--qc-pb 镜像 = 行盒 padding 的逐条对应（选择器/值与 padding 规则一一对应；
   //   含 S90 动态 cur-tp/cur-bp 与 S86 分级边缘距 —— 缺任一条 → 该形态行灰带高 ≠ 27.2）
   const mirrorCases = [
@@ -3673,4 +3693,27 @@ test('S99 WYSIWYG 不画 active-line 蓝底 + 光标色恒定（2026-10-25 用�
     /\.editor-container\.wysiwyg-mode[^{]*\{[^}]*caret-color: transparent/,
     'WYSIWYG 编辑面不得把 caret-color 设成 transparent',
   );
+});
+
+test('S106 引用块尾回车跳出（2026-10-25 用户反馈：块尾多次回车跳不出引用块、下方闪出一串 > 又自动消失）', () => {
+  const addon = fs.readFileSync(path.join(ROOT, 'src', 'lib', 'codemirror', 'addon', 'edit', 'continuelist.js'), 'utf8');
+  const vendorScript = fs.readFileSync(path.join(ROOT, 'scripts', 'ensure-vendor.mjs'), 'utf8');
+  // 根因：空引用行回车的「块中间续行」口径只看紧邻下一行是否引用行——用户块尾的空 >
+  // 续行产物落在光标下方（WYSIWYG 底部遮罩吞掉不可见），下一行永远是引用行 → 续行
+  // 死循环、永远跳不出。修复：光标行之下直到块尾全是空引用行 → 按块尾口径跳出，并
+  // 把这批不可见的续行垃圾一并删掉；下方还有带内容的引用行才维持续行口径（不拆块）。
+  // addon 是 vendor 再生文件——断言补丁源（受跟踪）+ 再生产物（本机状态）两层。
+  assert.ok(vendorScript.includes('var onlyEmptyBelow = true;'),
+    'ensure-vendor.mjs continuelist 补丁缺「块尾全空引用行判定」（onlyEmptyBelow 扫描缺失）');
+  assert.ok(addon.includes('var onlyEmptyBelow = true;'),
+    'continuelist.js 缺「块尾全空引用行判定」（onlyEmptyBelow 扫描缺失）');
+  assert.ok(addon.includes('if (typeof ql !== "string" || !/^\\s*>/.test(ql)) break;'),
+    'continuelist.js 缺块尾扫描终止条件（非引用行/EOF 即止）');
+  assert.ok(addon.includes('if (ql.replace(/^\\s*>[> \\t]*/, "").trim() !== "") { onlyEmptyBelow = false; break; }'),
+    'continuelist.js 缺「带内容的引用行 → 仍按块中间续行」判定（会拆块回归 S87 前的断块问题）');
+  assert.ok(addon.includes('cm.replaceRange("", { line: pos.line + 1, ch: 0 }, { line: blockEnd + 1, ch: 0 });'),
+    'continuelist.js 跳出前未删除光标行之下的空引用行垃圾（块底残留一排空行/裸源码）');
+  // 续行口径保留：下方有内容行时仍续行（2026-10-25 上轮「块中间回车断成两块」的回归保护）
+  assert.ok(addon.includes('replacements[i] = "\\n" + match[1] + match[2] + match[5];'),
+    'continuelist.js 块中间续行口径丢失（空引用行回车会拆开引用块）');
 });
