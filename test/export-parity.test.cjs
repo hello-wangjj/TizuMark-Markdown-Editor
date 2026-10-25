@@ -35,7 +35,7 @@ test('MathML 副本：导出前一律从 clone 摘掉，不依赖 CSS clip-path 
   assert.ok(calls.length >= 3,
     `_stripKatexMathml 应至少被长图、HTML、PDF 三处调用，实得 ${calls.length} 处`);
   for (const fn of ['async exportImage()', 'async exportHTML()', 'async _preparePdfClone()']) {
-    const body = sliceFn(fn, fn === 'async _preparePdfClone()' ? '// 回退路径用' : undefined);
+    const body = sliceFn(fn, fn === 'async _preparePdfClone()' ? 'getCachedImageURL(dataUri)' : undefined);
     assert.ok(body.includes('this._stripKatexMathml('), `${fn} 未摘除 .katex-mathml 副本`);
   }
 });
@@ -96,14 +96,20 @@ test('导出 HTML：复用阅读模式样式（不再用平行维护的 _documen
 
 // ---------------------------------------------------------------- 导出 PDF
 
-test('导出 PDF：主路径走 PrintToPdf（无打印对话框 / 无下载气泡），失败回退系统打印', () => {
+test('导出 PDF：主路径走 PrintToPdf（无打印对话框 / 无下载气泡），且无系统打印回退', () => {
   const body = sliceFn('async exportPDF() {', 'async _preparePdfClone');
   assert.ok(body.includes('TauriApi.printToPdf('), 'exportPDF 未走 WebView2 PrintToPdf');
   assert.ok(body.includes('await dialogSave('), 'exportPDF 未先让用户选保存路径（PrintToPdf 直接落盘）');
-  assert.ok(body.includes('this._exportViaSystemPrint('), 'exportPDF 缺系统打印回退（旧 WebView2 运行时会整条失败）');
-  // 回退必须在 catch 里，而不是 finally
-  const catchBlock = body.slice(body.indexOf('} catch (e) {'));
-  assert.ok(catchBlock.includes('_exportViaSystemPrint('), '系统打印回退不在 catch 分支');
+  // 确认框文案与 DOCX 同风格（pdfTip1/pdfTip2），不再提「更多设置」——PrintToPdf 不经过
+  // 系统打印对话框，页眉/背景图形那些选项无从谈起
+  assert.ok(body.includes("this.t('pdfTip1')") && body.includes("this.t('pdfTip2')"),
+    'exportPDF 确认框未使用 pdfTip1/pdfTip2 新文案');
+  assert.ok(!body.includes('printTip'), 'exportPDF 仍引用旧 printTip 文案（描述的是已不存在的打印对话框选项）');
+  // 2026-10-26 用户要求：彻底移除系统打印回退——PDF 被占用等落盘失败时弹系统打印对话框
+  // 体验割裂，失败就明确报错。全源码不得再出现 iframe 打印路径。
+  assert.ok(!SRC.includes('_exportViaSystemPrint'), '仍残留 _exportViaSystemPrint（系统打印回退未删净）');
+  assert.ok(!SRC.includes('_buildPdfPrintFrameHtml'), '仍残留 _buildPdfPrintFrameHtml（回退帧未删净）');
+  assert.ok(!/iframe\.contentWindow\.print\(/.test(SRC), '仍残留 iframe.contentWindow.print()（系统打印路径未删净）');
 });
 
 test('导出 PDF：打印态规则必须覆盖 styles.css 自带的 @media print（否则 UI 与遮罩被印进 PDF）', () => {
@@ -148,32 +154,38 @@ test('导出 PDF 行为：PrintToPdf 成功后打印态 DOM 全部清理', async
   });
 });
 
-test('导出 PDF 行为：PrintToPdf 失败时回退系统打印，且打印态同样清理', async () => {
+test('导出 PDF 行为：PrintToPdf 失败（如 PDF 被占用）→ 不弹系统打印、报错收尾、打印态清理', async () => {
   await withEditor({ invokeImpl: (cmd) => {
     if (cmd === 'plugin:dialog|save') return '/tmp/out.pdf';
     return null;
   } }, async (w, ed) => {
-    let fallback = false;
     ed.showConfirmDialog = async () => true;
-    w.TauriApi.printToPdf = async () => { throw new Error('WebView2 运行时过旧'); };
-    ed._exportViaSystemPrint = async () => { fallback = true; };
+    w.TauriApi.printToPdf = async () => { throw new Error('文件被占用'); };
     ed.activeTab.filePath = '/docs/note.md';
     ed.preview.innerHTML = '<p>段落</p>';
-
-    await ed.exportPDF();
-
-    assert.ok(fallback, 'PrintToPdf 失败后未回退到系统打印（旧 WebView2 上 PDF 导出会整个不可用）');
-    assert.strictEqual(w.document.getElementById('pdf-print-root'), null, '回退后打印态副本未移除');
-    assert.strictEqual(w.document.body.classList.contains('pdf-printing'), false, '回退后 body 仍带 pdf-printing');
+    const iframes = [];
+    const origCreate = w.document.createElement.bind(w.document);
+    w.document.createElement = function (tag) {
+      const el = origCreate(tag);
+      if (String(tag).toLowerCase() === 'iframe') iframes.push(el);
+      return el;
+    };
+    const toasts = [];
+    const origToast = ed.showToast.bind(ed);
+    ed.showToast = (msg, type) => toasts.push({ msg, type });
+    try {
+      await ed.exportPDF();
+      assert.strictEqual(iframes.length, 0, '失败时不得创建打印 iframe（系统打印回退已按用户要求移除）');
+      assert.ok(!toasts.some((t) => t.type === 'success'), '失败时不得弹成功 toast');
+      assert.match(String(ed.statusText && ed.statusText.textContent || ''), /失败|failed/i, '失败后状态栏应提示导出失败');
+      assert.strictEqual(w.document.getElementById('pdf-print-root'), null, '失败后打印态副本未移除');
+      assert.strictEqual(w.document.getElementById('tm-export-overlay'), null, '失败后遮罩未移除');
+      assert.strictEqual(w.document.body.classList.contains('pdf-printing'), false, '失败后 body 仍带 pdf-printing');
+    } finally {
+      w.document.createElement = origCreate;
+      ed.showToast = origToast;
+    }
   });
-});
-
-test('导出 PDF：回退帧自带完整 appCSS + KaTeX（不依赖网络）', () => {
-  // 注意：_buildPdfPrintFrameHtml 在源码里位于 exportPDF 之后，结束标记必须取它的下一个方法
-  const body = sliceFn('async _buildPdfPrintFrameHtml(clone) {', 'async _exportViaSystemPrint(');
-  assert.ok(body.includes('this._exportStyleFromLink('), '回退打印帧未从 CSSOM 采集样式');
-  assert.ok(body.includes('this._exportExpandRules('), '回退打印帧未展开滚动容器（只印一屏）');
-  assert.ok(!/fetch\('lib\/katex/.test(body), '回退打印帧仍裸 fetch katex CSS');
 });
 
 // ---------------------------------------------------------------- 长图
@@ -191,4 +203,67 @@ test('长图：导出必须带 loading 遮罩并在 finally 收尾', () => {
   assert.ok(body.includes("this.t('generatingImg')"), '长图导出没有 loading 文案');
   assert.ok(/finally \{[\s\S]{0,240}?this\._hideExportOverlay\(\)/.test(body),
     '长图遮罩未在 finally 收尾');
+});
+
+// ---------------------------------------------------------------- 2026-10-26 三条反馈回归
+
+test('长图：展开规则必须随 styleEl 进 SVG（SVG-as-image 是独立渲染环境，head 里的 expandStyle 序列化后不存在）', () => {
+  const body = sliceFn('async exportImage() {', 'async exportPDF');
+  // styleEl.textContent 组装点必须拼上 _exportExpandRules：appCSS 是完整 styles.css，
+  // 自带 .code-scroll{max-height:300px;overflow-y} / pre 滚动裁切——不拼等于「度量时展开、
+  // 成图时缩回」，长图里代码块重新只剩 300px + 滚动条（用户截图复现）。
+  assert.match(body,
+    /styleEl\.textContent = customFontCSS \+ appCSS \+ hljsCSS \+ katexCSS \+ expandCSSForSvg/,
+    '长图 styleEl 未拼展开规则（成图时代码块会重新折叠 + 滚动条）');
+  assert.match(body, /this\._exportExpandRules\(''\)/, '长图未生成 SVG 内展开 CSS');
+});
+
+test('导出 HTML：写盘成功后遮罩收尾弹「导出成功」toast（与 DOCX 同口径）', () => {
+  // exportHTML 与 exportWord 之间夹着 docx 页面尺寸/回退等方法（各有自己的 finally），
+  // 不能 lastIndexOf 整个切片——以 exportHTML 自己的 setStatus(exportedHTML) 为锚、
+  // 取其后第一段 finally。
+  const body = sliceFn('async exportHTML() {', 'async _fallbackWordHtmlExport');
+  assert.ok(body.includes('htmlExported = true'), 'HTML 写盘成功未置成功标记');
+  const anchor = body.indexOf("this.t('exportedHTML')");
+  assert.ok(anchor > 0, 'HTML 导出成功态缺失');
+  const fin = body.slice(anchor).match(/} finally \{[\s\S]*?\n        \}/);
+  assert.ok(fin, 'exportHTML finally 块定位失败');
+  const finTxt = fin[0];
+  assert.match(finTxt, /this\._hideExportOverlay\(\)/, 'HTML 遮罩未在 finally 收尾');
+  assert.match(finTxt, /if \(htmlExported\) this\.showToast\(this\.t\('exportSuccess'\), 'success'\)/,
+    'HTML 导出成功未弹 toast（用户不知道导出完没完成）');
+  // 顺序铁律（DOCX 注释）：先关遮罩再弹 toast，否则 toast 被遮罩盖住
+  assert.ok(finTxt.indexOf('this._hideExportOverlay()') < finTxt.indexOf('showToast'),
+    'toast 必须在遮罩关闭之后弹（否则被盖住）');
+});
+
+test('导出 PDF：白纸语义——打印态强制亮色外观 + 字面量 #fff 底色（修「页面背景是灰的」二轮反馈）', () => {
+  const body = sliceFn('async exportPDF() {', '// PDF 用的 clone 准备');
+  // 打印态强制 data-theme=light：暗色主题的浅色文字印在白纸上不可读
+  assert.match(body, /rootEl\.setAttribute\('data-theme', 'light'\)/, '打印态未强制亮色主题');
+  assert.match(body, /rootEl\.setAttribute\('data-theme', savedTheme\)/, 'finally 未恢复原主题');
+  // hljs：暗色高亮主题须换成亮色 github（浅色 token 印白纸才可见）
+  assert.match(body, /github\.min\.css/, '暗色 hljs 主题未在打印态换成亮色 github');
+  // 底色一律字面量 #fff：不依赖 CSS 变量解析，nord 等方案的灰紫 --preview-bg 不得再漏进来
+  assert.match(body,
+    /html\.pdf-printing, html\.pdf-printing body \{ background: #fff !important; \}/,
+    '打印态 html/body 底色未钉死纯白（应用灰底会被 PrintToPdf 印进页面画布）');
+  assert.match(body,
+    /#pdf-print-root \{ background: #fff !important; \}/,
+    '#pdf-print-root 未钉死纯白（内容列外区域会露应用底色）');
+  assert.ok(!/var\(--preview-bg/.test(body), '打印态底色仍依赖 --preview-bg 变量（主题漂移风险）');
+  // 成功 toast：导出完成后先关遮罩再弹（与 HTML/DOCX 同口径）
+  assert.match(body, /if \(pdfExported\) this\.showToast\(this\.t\('exportSuccess'\), 'success'\)/,
+    'PDF 导出成功未弹「导出成功」toast');
+});
+
+test('长图：写盘成功后遮罩收尾弹「导出成功」toast（与 HTML/DOCX/PDF 同口径）', () => {
+  const body = sliceFn('async exportImage() {', 'async exportPDF');
+  assert.ok(body.includes('imgExported = true'), '长图写盘成功未置成功标记');
+  const fin = body.slice(body.lastIndexOf('} finally {'));
+  assert.match(fin, /this\._hideExportOverlay\(\)/, '长图遮罩未在 finally 收尾');
+  assert.match(fin, /if \(imgExported\) this\.showToast\(this\.t\('exportSuccess'\), 'success'\)/,
+    '长图导出成功未弹 toast（用户不知道导出完没完成）');
+  assert.ok(fin.indexOf('this._hideExportOverlay()') < fin.indexOf('showToast'),
+    'toast 必须在遮罩关闭之后弹（否则被盖住）');
 });

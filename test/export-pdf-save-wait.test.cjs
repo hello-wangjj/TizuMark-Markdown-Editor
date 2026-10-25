@@ -6,8 +6,8 @@
 //      所以**必须**自己问路径，否则无处落地；
 //   ③ 主路径：WebView2 `ICoreWebView2_7::PrintToPdf`（`TauriApi.printToPdf`）直接落盘，
 //      全程无打印对话框、无下载气泡、无 iframe；
-//   ④ 回退路径（旧 WebView2 运行时抛错）：原系统打印 iframe + contentWindow.print()，
-//      文字仍是可选中的矢量文本。
+//   ④ 2026-10-26 用户要求：回退路径（系统打印 iframe）彻底移除——PrintToPdf 落盘失败
+//      （如目标 PDF 被占用）时弹系统打印对话框体验割裂，失败就明确报错、不回退。
 //
 // 已废弃的旧断言（这一版起不再成立）：
 //   - 「确认后不弹应用内保存框」—— 新方案**要**弹（②）；
@@ -137,64 +137,5 @@ test('exportPDF 主路径：先选路径 → PrintToPdf 直接落盘（A4 + 1.5c
     assert.strictEqual(w.document.body.classList.contains('pdf-printing'), false, 'body 仍带 pdf-printing');
     assert.strictEqual(w.document.documentElement.classList.contains('pdf-printing'), false,
       'html 仍带 pdf-printing（整页 UI 会持续隐藏）');
-  });
-});
-
-test('exportPDF 回退路径：PrintToPdf 抛错 → 系统打印 iframe，内容是可选中文本', async () => {
-  await withEditor({ invokeImpl: pdfSaveInvoke }, async (w, ed) => {
-    w.TauriApi.printToPdf = async () => { throw new Error('旧版 WebView2 无 PrintToPdf'); };
-    ed.showConfirmDialog = async () => true;
-    ed.activeTab.name = 'NOTE.md';
-    w.editor.preview.innerHTML = '<p>可选中的正文</p>';
-    const h = installHarness(w);
-    try {
-      await ed.exportPDF().catch(() => {});
-
-      const iframe = h.capturedIframes[0];
-      assert.ok(iframe, 'PrintToPdf 不可用时应回退建打印 iframe');
-      // srcdoc 是真实 HTML 文本（矢量文字），不是整页位图
-      assert.match(iframe.srcdoc, /可选中的正文/, 'srcdoc 应含真实文字节点，保证 PDF 文字可选中');
-      assert.ok(!/<img[^>]+data:image\/png;base64,[^"]{500,}/.test(iframe.srcdoc), 'srcdoc 不应是整页位图');
-
-      let printed = 0;
-      iframe.contentWindow.print = () => { printed += 1; };
-      iframe.onload();
-      assert.strictEqual(printed, 1, 'onload 后应调用系统打印 print()');
-
-      // afterprint 收尾：iframe 清理 + 主窗口 title 还原
-      w.document.title = 'TizuMark';
-      iframe.onload(); // 再走一次以覆盖 title（onload 幂等，仅覆盖 title）
-      h.fireAfterprint(iframe);
-      assert.strictEqual(iframe.parentNode, null, 'afterprint 后 iframe 应已清理');
-      assert.strictEqual(w.document.title, 'TizuMark', 'afterprint 后主窗口 title 应还原');
-    } finally {
-      h.restore();
-    }
-  });
-});
-
-test('exportPDF 回退路径：无 afterprint 时 30s watchdog 兜底收尾（清 iframe + 还原 title）', async () => {
-  await withEditor({ invokeImpl: pdfSaveInvoke }, async (w, ed) => {
-    w.TauriApi.printToPdf = async () => { throw new Error('旧版 WebView2 无 PrintToPdf'); };
-    ed.showConfirmDialog = async () => true;
-    ed.activeTab.name = '说明文档.md';
-    w.document.title = 'TizuMark';
-    const h = installHarness(w);
-    try {
-      await ed.exportPDF().catch(() => {});
-      const iframe = h.capturedIframes[0];
-      assert.ok(iframe && typeof iframe.onload === 'function');
-      iframe.onload();
-      assert.strictEqual(w.document.title, '说明文档', 'onload 后主窗口 title 应被覆盖为去扩展名文件名');
-
-      assert.ok(h.longTimers.size >= 1, '应排队至少 1 个 30s 兜底定时器');
-      h.fireLongTimers();
-
-      assert.strictEqual(iframe.parentNode, null, '30s 兜底应移除 iframe');
-      assert.strictEqual(w.document.title, 'TizuMark', '30s 兜底应还原主窗口 title');
-      assert.strictEqual(w.document.querySelector('.pdf-loading-spinner'), null, '30s 兜底应隐藏 overlay');
-    } finally {
-      h.restore();
-    }
   });
 });

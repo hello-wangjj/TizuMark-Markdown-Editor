@@ -90,30 +90,6 @@
         });
         await Promise.allSettled(imgPromises);
       },
-      // PDF 导出需要完整 styles.css。优先运行时 fetch（原始文本保真），失败则回退读取
-      // 已加载样式表的 CSSOM（自包含、不依赖网络/打包路径），彻底杜绝
-      // 「fetch 失败 → appCSS 空 → 打印样式大面积缺失」的软依赖风险。
-      async _loadStylesheetText(url) {
-        try {
-          const resp = await fetch(url);
-          if (resp.ok) {
-            const txt = await resp.text();
-            if (txt && txt.trim()) return txt;
-          }
-        } catch (e) { /* fallthrough to CSSOM */ }
-        try {
-          const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
-          for (const link of links) {
-            const href = link.getAttribute('href') || '';
-            if (href.indexOf(url) === -1) continue;
-            const sheet = link.sheet;
-            if (!sheet) continue;
-            const rules = Array.from(sheet.cssRules).map((r) => r.cssText).join('\n');
-            if (rules && rules.trim()) return rules;
-          }
-        } catch (e) { /* cross-origin 等忽略 */ }
-        return '';
-      },
       // 文档导出（HTML / Word）共用的基础样式表。
       // 使用标签级选择器（h1/pre/...）而非 .preview-content 后代选择器，
       // 因为导出时 this.preview 的外层容器被丢弃，仅其 children 进入 <body>。
@@ -813,6 +789,7 @@
       // DOCX 不走本方法（exportWord → export-docx.js），导出逻辑与样式均不受影响。
       async exportHTML() {
         let overlayOn = false;
+        let htmlExported = false;
         try {
           const path = await dialogSave({
             defaultPath: this.activeTab.filePath
@@ -901,10 +878,15 @@
   
           await TauriApi.writeFile({ path, content: fullHTML });
           this.setStatus(`${this.t('exportedHTML')}: ${path}`);
+          htmlExported = true;
         } catch (error) {
           this.setStatus(`${this.t('exportFailed')}: ${error}`);
         } finally {
           if (overlayOn) this._hideExportOverlay();
+          // 2026-10-26 用户反馈：HTML 导出遮罩结束后没有任何成功提示，不知道完没完成。
+          // 与 DOCX 同口径（export.js「导出真正完成后再弹成功提示；先关遮罩，确保 toast
+          // 不被遮住」）——写入文件成功才弹，失败只走 setStatus 错误态。
+          if (htmlExported) this.showToast(this.t('exportSuccess'), 'success');
         }
       },
       // docx 页面尺寸（twips，1/20 pt）：A4 / Letter，支持纵向/横向。
@@ -1331,6 +1313,7 @@
         let overlayOn = false;
         let host = null;
         let expandStyle = null;
+        let imgExported = false;
         try {
           overlayOn = true;
           this._showExportOverlay(this.t('generatingImg'));
@@ -1386,8 +1369,15 @@
           const katexCSS = await this._inlineCssFonts(katexSheet.css, katexSheet.base);
 
           // ---- 3) 组装 SVG：样式塞进宿主内部一起序列化（XMLSerializer 会正确转义 CSS 里的 < &） ----
+          // ⚠️ _exportExpandRules 必须跟着进这份 style：SVG-as-image 是**独立渲染环境**，
+          // document.head 里的 expandStyle（度量阶段用的）序列化后不存在 —— 而采集进来的
+          // appCSS 是完整 styles.css，自带 .code-scroll{max-height:300px;overflow-y} 与
+          // pre 的滚动/裁切规则，不加展开规则等于「度量时展开、成图时又缩回去」：长图里
+          // 代码块再次只剩 300px + 滚动条（2026-10-26 用户截图复现）。scope 用 ''：host
+          // 序列化后就是 foreignObject 的根，全文档作用域恰好等于宿主内部作用域。
+          const expandCSSForSvg = this._exportExpandRules('');
           const styleEl = document.createElement('style');
-          styleEl.textContent = customFontCSS + appCSS + hljsCSS + katexCSS;
+          styleEl.textContent = customFontCSS + appCSS + hljsCSS + katexCSS + expandCSSForSvg;
           host.insertBefore(styleEl, host.firstChild);
           // 清掉离屏定位等宿主专用内联样式，只留排版必需的宽度/背景/取消内部滚动
           host.setAttribute('style', `width:${W}px;height:auto;overflow:visible;background:${bg};`);
@@ -1440,6 +1430,7 @@
           const bytes = new Uint8Array(binaryStr.length);
           for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
           await TauriApi.writeBinaryFile({ path: result, contents: Array.from(bytes) });
+          imgExported = true;
 
           this.setStatus(`${this.t('exportedImg')}: ${result}`);
         } catch (error) {
@@ -1449,24 +1440,29 @@
           if (expandStyle && expandStyle.parentNode) expandStyle.parentNode.removeChild(expandStyle);
           if (host && host.parentNode) host.parentNode.removeChild(host);
           if (overlayOn) this._hideExportOverlay();
+          // 2026-10-26 用户反馈：长图导出完成后没有任何成功提示。与 HTML/DOCX/PDF 同口径：
+          // 先关遮罩再弹 toast，且只在写盘成功后弹。
+          if (imgExported) this.showToast(this.t('exportSuccess'), 'success');
         }
       },
-      // PDF 导出（2026-10-25 重做）。
+      // PDF 导出（2026-10-25 重做；2026-10-26 二轮：去系统打印回退 + 白纸语义 + 成功 toast）。
       //
       // 旧路径：iframe.srcdoc + contentWindow.print() —— 会拉起 Chromium 打印预览，用户
       // 「另存为 PDF」走的是浏览器下载管线，窗口右上角会弹出 Edge 风格的下载气泡（用户反馈）；
       // 而且打印帧是另建的文档，appCSS / katex / hljs 全靠手工拼进去，拼漏一项就与阅读模式
       // 不一致（用户反馈的公式出现第二份纯文本、代码高亮丢失都出在这条路上）。
       //
-      // 新路径：先选保存路径 → 把预览搬进 body 直下的 #pdf-print-root、隐藏其余 UI →
+      // 现路径：先选保存路径 → 把预览搬进 body 直下的 #pdf-print-root、隐藏其余 UI →
       // 调 Rust 的 print_to_pdf（WebView2 PrintToPdf）直接写文件。全程无对话框、无下载气泡，
       // 样式就是当前文档那一套（同一个文档、同一份 styles.css），与阅读模式天然一致。
-      // 旧版 WebView2 运行时缺 PrintToPdf 时自动回退原来的系统打印路径。
+      // 2026-10-26 用户要求**彻底移除**系统打印回退（PrintToPdf 落盘失败——如目标 PDF 被
+      // 占用——时回退会突然弹出系统打印对话框，体验割裂）：失败就明确报错。
       async exportPDF() {
-        // Print tips + 醒目警示（"文件较大时生成 PDF 耗时较长..."）一起在确认框里展示
+        // 确认框文案与 DOCX 同风格：说明导出特性 + 大文件警示。不再提「更多设置」——
+        // PrintToPdf 不经过系统打印对话框，页眉/背景图形那些选项无从谈起。
         const proceed = await this.showConfirmDialog(
           this.t('exportPDF'),
-          this.t('printTip1') + '\n\n' + this.t('printTip2'),
+          this.t('pdfTip1') + '\n\n' + this.t('pdfTip2'),
           null,
           this.t('pdfBigFileWarn'),
         );
@@ -1488,9 +1484,31 @@
         let printRoot = null;
         let printStyle = null;
         let expandStyle = null;
-        let handedOverToPrint = false;
+        let savedTheme = null;
+        let savedHljsHref = null;
+        let pdfExported = false;
         try {
           await new Promise(r => requestAnimationFrame(r));
+
+          // 白纸语义（2026-10-26 用户二轮反馈：PDF 页面必须是白色背景）：打印态强制亮色
+          // 外观 —— 暗色主题的浅色文字印在白纸上不可读（mermaid 也按亮色重绘，见
+          // _preparePdfClone）；配色方案保持用户所选，内容底色由下方字面量 #fff 兜底，
+          // 不依赖任何 CSS 变量解析。恢复在 finally。
+          const rootEl = document.documentElement;
+          savedTheme = rootEl.getAttribute('data-theme');
+          rootEl.setAttribute('data-theme', 'light');
+          const hljsLink = document.getElementById('highlight-theme');
+          savedHljsHref = hljsLink ? hljsLink.getAttribute('href') : null;
+          if (hljsLink && /dark/i.test(savedHljsHref || '')) {
+            hljsLink.href = 'lib/highlight.js/github.min.css';
+            await new Promise((res) => {
+              let done = false;
+              const fin = () => { if (!done) { done = true; res(); } };
+              hljsLink.addEventListener('load', fin, { once: true });
+              hljsLink.addEventListener('error', fin, { once: true });
+              setTimeout(fin, 1500);
+            });
+          }
 
           clone = await this._preparePdfClone();
 
@@ -1508,6 +1526,12 @@
           // #tm-export-overlay），否则会被 `body > *` 的 display:none 一起吞掉。
           printStyle.textContent = `
     html.pdf-printing, body.pdf-printing { height: auto !important; overflow: visible !important; }
+    /* 白纸语义（2026-10-26 用户二轮反馈，必须解决）：PrintToPdf 会把背景印出来，body 的
+       应用底色成了 PDF 页面画布色（用户实测：内容列白、页面其余全灰）。html/body 与内容
+       根容器一律**字面量 #fff**——不随主题变量漂移，连同页面物理边距区域一起覆盖。
+       暗色主题已由 data-theme=light 强制亮色。 */
+    html.pdf-printing, html.pdf-printing body { background: #fff !important; }
+    #pdf-print-root { background: #fff !important; }
     html.pdf-printing body > * { display: none !important; }
     html.pdf-printing #pdf-print-root { display: block !important; overflow: visible !important; height: auto !important; }
     /* 进度遮罩要留在屏幕上，但绝不能被打进 PDF（@media print 只作用于打印渲染） */
@@ -1555,27 +1579,27 @@
               marginRight: 0.59,
             },
           });
+          pdfExported = true;
           this.setStatus(`${this.t('exportedPDF')}: ${targetPath}`);
         } catch (e) {
-          // 旧版 WebView2 运行时没有 ICoreWebView2_7::PrintToPdf → 回退系统打印，功能不丢
-          console.warn('[exportPDF] PrintToPdf 不可用，回退系统打印:', e);
-          handedOverToPrint = true;
-          try {
-            const fallbackClone = clone || await this._preparePdfClone();
-            const html = await this._buildPdfPrintFrameHtml(fallbackClone);
-            const escapedTitle = safeBaseName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-            await this._exportViaSystemPrint(html, safeBaseName, escapedTitle, () => this._hideExportOverlay());
-          } catch (e2) {
-            console.error('exportPDF fallback error:', e2);
-            this.setStatus(this.t('exportError'));
-          }
+          // 2026-10-26 用户要求：不回退系统打印（PDF 被占用等落盘失败时弹系统打印对话框
+          // 体验割裂）——失败就明确报错，遮罩在 finally 收尾。
+          console.error('[exportPDF] PrintToPdf 失败:', e);
+          this.setStatus(`${this.t('exportFailed')}: ${e && e.message ? e.message : e}`);
         } finally {
+          const rootEl = document.documentElement;
+          if (savedTheme !== null) rootEl.setAttribute('data-theme', savedTheme);
+          else rootEl.removeAttribute('data-theme');
+          const hljsLink = document.getElementById('highlight-theme');
+          if (hljsLink && savedHljsHref) hljsLink.href = savedHljsHref;
           document.documentElement.classList.remove('pdf-printing');
           document.body.classList.remove('pdf-printing');
           if (printStyle && printStyle.parentNode) printStyle.parentNode.removeChild(printStyle);
           if (expandStyle && expandStyle.parentNode) expandStyle.parentNode.removeChild(expandStyle);
           if (printRoot && printRoot.parentNode) printRoot.parentNode.removeChild(printRoot);
-          if (!handedOverToPrint) this._hideExportOverlay();
+          // 先关遮罩再弹成功提示（DOCX/HTML 同口径：toast 不能被遮罩盖住）
+          this._hideExportOverlay();
+          if (pdfExported) this.showToast(this.t('exportSuccess'), 'success');
         }
       },
       // PDF 用的 clone 准备：去交互件、摘 MathML 副本、图片内联、Mermaid 按固定 viewBox 重绘。
@@ -1621,105 +1645,6 @@
           }
         }
         return clone;
-      },
-      // 回退路径用：把 clone 组装成独立打印帧 HTML（完整 appCSS + 亮色 hljs + katex + 打印补充）
-      // async：hljs 亮色主题要优先取原文（见下方注释）。
-      async _buildPdfPrintFrameHtml(clone) {
-        const name = String(this.activeTab.name || '').replace(/\.[^.]+$/, '') || 'document';
-        const escapedTitle = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        const colorScheme = document.documentElement.getAttribute('data-color-scheme') || 'default';
-        const appSheet = this._exportStyleFromLink((h) => /(^|\/)styles\.css(\?|$)/.test(h));
-        const katexSheet = this._exportStyleFromLink((h) => /katex/.test(h) && /\.css(\?|$)/.test(h));
-        const appCSS = this._absolutizeCssUrls(appSheet.css, appSheet.base);
-        const katexCSS = this._absolutizeCssUrls(katexSheet.css, katexSheet.base);
-        // hljs：本帧钉死 light 纸面（data-theme="light"），必须配**亮色**主题 ——
-        // styles.css 里只有 token 映射说明、没有 .hljs-* 配色，缺主题就是一片纯黑；
-        // 而暗色主题的 token 色印在白纸上又几乎看不见（用户反馈过「暗黑模式导出 PDF
-        // 代码块文字发灰看不清」）。故优先取亮色主题原文，取不到才退回当前加载主题。
-        const hljsCSS = (await this._loadStylesheetText('lib/highlight.js/github.min.css'))
-          || this._exportStyleFromLink((h) => /github|highlight|hljs/.test(h)).css;
-        const customFontStyleEl = document.getElementById('custom-fonts-style');
-        const customFontCSS = customFontStyleEl ? (customFontStyleEl.textContent || '') : '';
-
-        const printCSS = `
-    @page { margin: 1.5cm; }
-    html, body { margin: 0 !important; padding: 0 !important; background: white !important; }
-    .preview-content { max-width: 680px !important; margin: 0 auto !important; padding: 16px 24px !important; font-family: ${this._exportPdfFontStack()} !important; }
-    ${this._exportExpandRules('.preview-content')}
-    .preview-content pre code.hljs,
-    .preview-content pre .hljs { background: transparent !important; padding: 12px 16px !important; }
-    .code-line { display: flex !important; line-height: 1.8 !important; min-width: 0 !important; }
-    .code-line-num { flex-shrink: 0 !important; width: 3em !important; text-align: right !important; padding-right: 0.8em !important; color: #888 !important; user-select: none !important; display: none !important; }
-    .preview-content.code-line-numbers .code-line-num { display: inline !important; }
-    .code-line-text { flex: 1 1 auto !important; min-width: 0 !important; }
-    .mermaid-container { margin: 8px 0 !important; max-width: 100% !important; overflow: hidden !important; break-inside: avoid; page-break-inside: avoid; }
-    .mermaid-container svg { width: auto !important; max-width: 100% !important; height: auto !important; display: block !important; margin: 0 auto !important; }
-    h1, h2, h3 { page-break-after: avoid; }
-    blockquote, table, img, .math-display, .alert, .mermaid-container { page-break-inside: avoid; }
-    p, li { orphans: 3; widows: 3; }
-    input[type="checkbox"] { -webkit-appearance: none; appearance: none; margin-right: 8px; width: 16px; height: 16px; border: 1.5px solid #d4d4d8; border-radius: 3px; vertical-align: middle; position: relative; top: -1px; cursor: default; }
-    input[type="checkbox"]:checked { background: #16a34a; border-color: #16a34a; }
-    input[type="checkbox"]:checked::after { display: none !important; }`;
-
-        return `<!DOCTYPE html>
-    <html lang="zh-CN" data-color-scheme="${colorScheme}" data-theme="light">
-    <head><meta charset="UTF-8"><title>${escapedTitle}</title>
-    <style>${customFontCSS}${appCSS}${hljsCSS}${katexCSS}${printCSS}</style></head>
-    <body>
-    <div class="${clone.getAttribute('class') || 'preview-content'}">${clone.innerHTML}</div>
-    </body></html>`;
-      },
-      // 系统打印路径（iframe + contentWindow.print()）：用 OS 打印引擎生成 PDF。
-      // 不做落盘检测（OS 打印后台异步写盘，应用拿不到"写完"回调；警示已前置到确认框）。
-      // afterprint（用户在系统框里点完打印/取消后触发）一回调即收尾；30s watchdog 兜底异常。
-      async _exportViaSystemPrint(html, safeBaseName, escapedTitle, hideOverlay) {
-        const iframe = document.createElement('iframe');
-        iframe.style.cssText = 'position:fixed;left:-9999px;top:0;width:680px;height:600px;border:none;';
-        iframe.srcdoc = html;
-        document.body.appendChild(iframe);
-  
-        // 文件名来源：Chromium 打印 PDF 默认文件名取自【主窗口】(顶层 frame) title，
-        // 而非 srcdoc 子 frame <title>。故 onload 临时覆盖主窗口 document.title 为 md 文件名，
-        // 打印结束后还原（afterprint 或 watchdog 兜底）。同时显式写 contentDocument.title 兼容。
-        const originalTitle = document.title;
-        let titleRestored = false;
-        const restoreTitle = () => {
-          if (titleRestored) return;
-          titleRestored = true;
-          document.title = originalTitle;
-        };
-  
-        // 两条清理路径（afterprint / 30s 兜底 watchdog）共用 cleanupIframe + cleaned 互斥标志，
-        // 避免"iframe 已 remove 后再次读 contentWindow.removeEventListener"报 NPE。
-        let cleaned = false;
-        let finished = false;
-        const cleanupIframe = () => {
-          if (cleaned) return;
-          cleaned = true;
-          restoreTitle();
-          if (iframe.contentWindow) {
-            try { iframe.contentWindow.removeEventListener('afterprint', after); } catch (_) {}
-          }
-          if (iframe.parentNode) iframe.remove();
-        };
-        const finish = () => {
-          if (finished) return;
-          finished = true;
-          clearTimeout(watchdog);
-          cleanupIframe();
-          hideOverlay();
-        };
-        const after = () => finish();
-        // 30s 兜底：覆盖"用户在系统框里点取消 / afterprint 不触发"等异常路径，
-        // 走完整收尾（清 iframe + 还原 title + 隐藏 overlay）。
-        const watchdog = setTimeout(finish, 30000);
-  
-        iframe.onload = () => {
-          if (iframe.contentDocument) iframe.contentDocument.title = escapedTitle;
-          document.title = safeBaseName; // 主窗口 title 决定系统打印对话框默认文件名
-          iframe.contentWindow.addEventListener('afterprint', after);
-          iframe.contentWindow.print();
-        };
       },
       getCachedImageURL(dataUri) {
         if (!dataUri || !dataUri.startsWith('data:')) return dataUri;

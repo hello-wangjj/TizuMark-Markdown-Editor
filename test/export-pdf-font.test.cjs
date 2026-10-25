@@ -59,55 +59,30 @@ async function runExportPdf(w, ed) {
   await ed.exportPDF().catch(() => {});
 }
 
-test('exportPDF: 未设置预览字体时正文钉 TrueType 中文尾链（无 Noto/SourceHan/PingFang）', async () => {
-  await withEditor({ invokeImpl: (cmd) => (cmd === 'plugin:dialog|save' ? '/tmp/out.pdf' : null) }, async (w, ed) => {
-    const h = capturePdfIframe(w);
-    try {
-      await runExportPdf(w, ed);
-      assert.ok(h.captured.length >= 1, 'exportPDF 应创建打印 iframe');
-      const doc = h.captured[0].srcdoc || '';
-      const bodies = ruleBodies(doc, /\.preview-content/);
-      const hit = bodies.find(b => /font-family/i.test(b));
-      assert.ok(hit, '打印 HTML 应含带 font-family 的 .preview-content 规则');
-      const yaheiIdx = hit.indexOf('"Microsoft YaHei"');
-      const sansIdx = hit.indexOf('sans-serif');
-      assert.ok(yaheiIdx !== -1, '字体链应含 "Microsoft YaHei"');
-      assert.ok(sansIdx !== -1 && yaheiIdx < sansIdx, '"Microsoft YaHei" 必须排在 sans-serif 之前');
-      assert.ok(!/Noto|Source Han|PingFang SC/.test(hit), '字体链不应含 Noto / Source Han / PingFang SC');
-    } finally {
-      h.restore();
-    }
+test('exportPDF: 未设置预览字体时字体链钉 TrueType 中文尾链（无 Noto/SourceHan/PingFang）', async () => {
+  await withEditor({}, async (w, ed) => {
+    const stack = ed._exportPdfFontStack();
+    const yaheiIdx = stack.indexOf('"Microsoft YaHei"');
+    const sansIdx = stack.indexOf('sans-serif');
+    assert.ok(yaheiIdx !== -1, '字体链应含 "Microsoft YaHei"');
+    assert.ok(sansIdx !== -1 && yaheiIdx < sansIdx, '"Microsoft YaHei" 必须排在 sans-serif 之前');
+    assert.ok(!/Noto|Source Han|PingFang SC/.test(stack), '字体链不应含 Noto / Source Han / PingFang SC');
   });
 });
 
 test('exportPDF: 用户设置的预览字体排在字体链首位（不被硬编码整链顶掉）', async () => {
-  await withEditor({ invokeImpl: (cmd) => (cmd === 'plugin:dialog|save' ? '/tmp/out.pdf' : null) }, async (w, ed) => {
+  await withEditor({}, async (w, ed) => {
     ed.settings.previewFont = 'IBM Plex Serif';
-    const h = capturePdfIframe(w);
-    try {
-      ed.activeTab.name = 'NOTE.md';
-      const stack = ed._exportPdfFontStack();
-      assert.ok(
-        stack.startsWith('"IBM Plex Serif", '),
-        `字体链应以用户预览字体开头，实际：${stack}`,
-      );
-      await runExportPdf(w, ed);
-      const doc = h.captured[0].srcdoc || '';
-      const hit = ruleBodies(doc, /\.preview-content/).find(b => /font-family/i.test(b));
-      assert.ok(hit, '打印 HTML 应含带 font-family 的 .preview-content 规则');
-      const value = fontFamilyValue(hit);
-      assert.ok(
-        value.startsWith('"IBM Plex Serif"'),
-        `用户预览字体应排在字体链首位，实际：${value}`,
-      );
-      assert.ok(/"Microsoft YaHei"/.test(value), '用户字体之后仍应保留中文尾链兜底');
-    } finally {
-      h.restore();
-    }
+    const stack = ed._exportPdfFontStack();
+    assert.ok(
+      stack.startsWith('"IBM Plex Serif", '),
+      `字体链应以用户预览字体开头，实际：${stack}`,
+    );
+    assert.ok(/"Microsoft YaHei"/.test(stack), '用户字体之后仍应保留中文尾链兜底');
   });
 });
 
-test('exportPDF: 自定义预览字体的 @font-face 一并注入打印帧', async () => {
+test('exportPDF: 自定义字体链首生效且 printRoot 内联样式不引入 font-family（防污染代码字体）', async () => {
   await withEditor({ invokeImpl: (cmd) => (cmd === 'plugin:dialog|save' ? '/tmp/out.pdf' : null) }, async (w, ed) => {
     ed.settings.customFonts = [{ id: 'abc', name: 'MyFont', fileName: 'my.ttf', hash: 'h' }];
     ed.settings.previewFont = 'abc';
@@ -121,21 +96,28 @@ test('exportPDF: 自定义预览字体的 @font-face 一并注入打印帧', asy
     }
     style.textContent = "@font-face{font-family:'tizumark-custom-abc';src:url(data:font/ttf;base64,AAA) format('truetype');font-display:swap;}";
     assert.ok(style.textContent.length > 0, '@font-face 样式应写入 #custom-fonts-style');
-    const h = capturePdfIframe(w);
+    ed.activeTab.name = 'NOTE.md';
+    assert.ok(
+      ed._exportPdfFontStack().startsWith("'tizumark-custom-abc'"),
+      '自定义字体应作为链首',
+    );
+    // 主路径在同一文档打印（#custom-fonts-style 天然生效），但打印容器不得带内联
+    // font-family——否则用户正文字体会盖过 pre/code 的 --font-code-preview。
+    let printed = false, rootCssText = null;
+    w.TauriApi.printToPdf = async () => {
+      printed = true;
+      const root = w.document.getElementById('pdf-print-root');
+      rootCssText = root ? root.style.cssText : null;
+    };
+    ed.showConfirmDialog = async () => true;
+    ed.activeTab.filePath = '/docs/note.md';
+    ed.preview.innerHTML = '<p>正文</p>';
     try {
-      ed.activeTab.name = 'NOTE.md';
-      assert.ok(
-        ed._exportPdfFontStack().startsWith("'tizumark-custom-abc'"),
-        '自定义字体应作为链首',
-      );
-      await runExportPdf(w, ed);
-      const doc = h.captured[0].srcdoc || '';
-      assert.ok(
-        /@font-face\{font-family:'tizumark-custom-abc'/.test(doc),
-        '打印帧应携带自定义字体的 @font-face，否则链首字体无字形可落',
-      );
+      await ed.exportPDF();
+      assert.ok(printed, 'PrintToPdf 未被调用');
+      assert.ok(rootCssText !== null, '打印态容器缺失');
+      assert.ok(!/font-family/i.test(rootCssText || ''), '打印容器内联样式不得含 font-family（会污染代码字体）');
     } finally {
-      h.restore();
       style.remove();
     }
   });
@@ -164,34 +146,15 @@ test('exportPDF: mermaid 重渲染字体链 = 用户字体 + 中文尾链', asyn
 });
 
 test('exportPDF: 正文字体不污染代码字体（pre/code 仍走 --font-code-preview）', async () => {
-  await withEditor({ invokeImpl: (cmd) => (cmd === 'plugin:dialog|save' ? '/tmp/out.pdf' : null) }, async (w, ed) => {
-    const h = capturePdfIframe(w);
-    try {
-      await runExportPdf(w, ed);
-      const doc = h.captured[0].srcdoc || '';
-      const leaks = [];
-      const ruleRe = /([^{}]+)\{([^}]*)\}/g;
-      let m;
-      while ((m = ruleRe.exec(doc)) !== null) {
-        const sel = m[1];
-        const body = m[2];
-        if (!/Microsoft YaHei/.test(body)) continue;
-        if (/(^|[,\s])(pre|code|\*|code-line-text)/i.test(sel)) leaks.push(sel.trim());
-      }
-      assert.deepStrictEqual(leaks, [], '正文 CJK 字体不得出现在 pre/code/*/code-line-text 选择器上');
-    } finally {
-      h.restore();
-    }
-
-    // 代码字体护栏：直接对 styles.css 源文件断言这两条规则仍在
-    const css = fs.readFileSync(path.join(__dirname, '../src/styles.css'), 'utf8');
-    assert.ok(
-      /\.preview-content code\s*\{[^}]*var\(--font-code-preview\)/.test(css),
-      'styles.css 应仍含 .preview-content code { ... var(--font-code-preview) ... }',
-    );
-    assert.ok(
-      /\.preview-content pre code[\s\S]*?var\(--font-code-preview\)[^;]*!important/.test(css),
-      'styles.css 应仍含 .preview-content pre code { ... var(--font-code-preview) ... !important ... }',
-    );
-  });
+  // 代码字体护栏：直接对 styles.css 源文件断言这两条规则仍在（主路径正文渲染在当前
+  // 文档里，styles.css 就是唯一真源）
+  const css = fs.readFileSync(path.join(__dirname, '../src/styles.css'), 'utf8');
+  assert.ok(
+    /\.preview-content code\s*\{[^}]*var\(--font-code-preview\)/.test(css),
+    'styles.css 应仍含 .preview-content code { ... var(--font-code-preview) ... }',
+  );
+  assert.ok(
+    /\.preview-content pre code[\s\S]*?var\(--font-code-preview\)[^;]*!important/.test(css),
+    'styles.css 应仍含 .preview-content pre code { ... var(--font-code-preview) ... !important ... }',
+  );
 });
