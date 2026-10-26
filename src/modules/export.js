@@ -90,6 +90,30 @@
         });
         await Promise.allSettled(imgPromises);
       },
+      // PDF 导出需要完整 styles.css。优先运行时 fetch（原始文本保真），失败则回退读取
+      // 已加载样式表的 CSSOM（自包含、不依赖网络/打包路径），彻底杜绝
+      // 「fetch 失败 → appCSS 空 → 打印样式大面积缺失」的软依赖风险。
+      async _loadStylesheetText(url) {
+        try {
+          const resp = await fetch(url);
+          if (resp.ok) {
+            const txt = await resp.text();
+            if (txt && txt.trim()) return txt;
+          }
+        } catch (e) { /* fallthrough to CSSOM */ }
+        try {
+          const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+          for (const link of links) {
+            const href = link.getAttribute('href') || '';
+            if (href.indexOf(url) === -1) continue;
+            const sheet = link.sheet;
+            if (!sheet) continue;
+            const rules = Array.from(sheet.cssRules).map((r) => r.cssText).join('\n');
+            if (rules && rules.trim()) return rules;
+          }
+        } catch (e) { /* cross-origin 等忽略 */ }
+        return '';
+      },
       // 文档导出（HTML / Word）共用的基础样式表。
       // 使用标签级选择器（h1/pre/...）而非 .preview-content 后代选择器，
       // 因为导出时 this.preview 的外层容器被丢弃，仅其 children 进入 <body>。
@@ -1445,7 +1469,19 @@
           if (imgExported) this.showToast(this.t('exportSuccess'), 'success');
         }
       },
-      // PDF 导出（2026-10-25 重做；2026-10-26 二轮：去系统打印回退 + 白纸语义 + 成功 toast）。
+      // PrintToPdf 能力检测：ICoreWebView2_7::PrintToPdf 随 WebView2 运行时 101.x（2022-05）
+      // 发布，WebView2 的 UA Chrome/ 主版本即运行时内核版本（Chromium 101 = 接口齐备）。
+      // UA 解析不到（非 WebView2 环境 / 未来 UA 变化）按**支持**处理：走 PrintToPdf 主路径，
+      // 真失败再报错——宁可报错也不冒进回退（2026-10-26 用户反馈：PDF 被占用时弹系统打印
+      // 对话框体验割裂，回退只准给「确实没能力」的老运行时）。
+      _supportsPrintToPdf() {
+        try {
+          const m = /Chrome\/(\d+)/.exec(navigator.userAgent || '');
+          if (m) return parseInt(m[1], 10) >= 101;
+        } catch (_e) { /* fallthrough */ }
+        return true;
+      },
+      // PDF 导出（2026-10-25 重做；2026-10-26 二轮：白纸语义 + 成功 toast；三轮：按能力分流回退）。
       //
       // 旧路径：iframe.srcdoc + contentWindow.print() —— 会拉起 Chromium 打印预览，用户
       // 「另存为 PDF」走的是浏览器下载管线，窗口右上角会弹出 Edge 风格的下载气泡（用户反馈）；
@@ -1487,8 +1523,25 @@
         let savedTheme = null;
         let savedHljsHref = null;
         let pdfExported = false;
+        let handedOverToPrint = false;
+        const escapedTitle = safeBaseName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        // 能力分流（2026-10-26 用户三轮要求）：检测运行时是否支持 PrintToPdf——
+        // 支持则只走 PrintToPdf，落盘失败（如 PDF 被占用）明确报错、绝不弹系统打印；
+        // 不支持（极旧 WebView2，UA Chrome 主版本 < 101）才走系统打印回退。
+        const capable = this._supportsPrintToPdf();
+        // 恢复快照必须在任何可能提前 throw 之前捕获——否则 finally 的恢复逻辑会
+        // 把用户当前主题/hljs 误当成「未设置」清掉（removeAttribute 的危险分支）。
+        const rootEl0 = document.documentElement;
+        savedTheme = rootEl0.getAttribute('data-theme');
+        const hljsLink0 = document.getElementById('highlight-theme');
+        savedHljsHref = hljsLink0 ? hljsLink0.getAttribute('href') : null;
         try {
           await new Promise(r => requestAnimationFrame(r));
+          if (!capable) {
+            const err = new Error('runtime lacks PrintToPdf');
+            err.__noPrintToPdf = true;
+            throw err;
+          }
 
           // 白纸语义（2026-10-26 用户二轮反馈：PDF 页面必须是白色背景）：打印态强制亮色
           // 外观 —— 暗色主题的浅色文字印在白纸上不可读（mermaid 也按亮色重绘，见
@@ -1532,6 +1585,11 @@
        暗色主题已由 data-theme=light 强制亮色。 */
     html.pdf-printing, html.pdf-printing body { background: #fff !important; }
     #pdf-print-root { background: #fff !important; }
+    /* 关键：body 有 transition: background-color .3s ease（styles.css body 规则）——强制
+       亮色/白底后颜色是**渐变过渡**，实测 300ms 才到白；PrintToPdf 在类翻转后约 100ms
+       快照，会把**过渡中的灰色**印进 PDF（真机 timeline 实测：45ms 间隔采样
+       32→81→181→222→244→253→255）。打印态全局禁用 transition，白底即刻生效。 */
+    html.pdf-printing, html.pdf-printing body, html.pdf-printing * { transition: none !important; }
     html.pdf-printing body > * { display: none !important; }
     html.pdf-printing #pdf-print-root { display: block !important; overflow: visible !important; height: auto !important; }
     /* 进度遮罩要留在屏幕上，但绝不能被打进 PDF（@media print 只作用于打印渲染） */
@@ -1582,10 +1640,25 @@
           pdfExported = true;
           this.setStatus(`${this.t('exportedPDF')}: ${targetPath}`);
         } catch (e) {
-          // 2026-10-26 用户要求：不回退系统打印（PDF 被占用等落盘失败时弹系统打印对话框
-          // 体验割裂）——失败就明确报错，遮罩在 finally 收尾。
-          console.error('[exportPDF] PrintToPdf 失败:', e);
-          this.setStatus(`${this.t('exportFailed')}: ${e && e.message ? e.message : e}`);
+          if (capable) {
+            // 运行时明明支持 PrintToPdf 还失败（PDF 被占用 / 磁盘错误等）——明确报错，
+            // 绝不弹系统打印对话框（2026-10-26 用户反馈的割裂体验）。
+            console.error('[exportPDF] PrintToPdf 失败:', e);
+            this.setStatus(`${this.t('exportFailed')}: ${e && e.message ? e.message : e}`);
+          } else {
+            // 极旧 WebView2 运行时（无 ICoreWebView2_7::PrintToPdf）：按用户指示回退
+            // 系统打印，功能不丢。回退路径自行管理遮罩（afterprint/30s 收尾时隐藏）。
+            handedOverToPrint = true;
+            try {
+              const fallbackClone = clone || await this._preparePdfClone();
+              const html = await this._buildPdfPrintFrameHtml(fallbackClone);
+              await this._exportViaSystemPrint(html, safeBaseName, escapedTitle, () => this._hideExportOverlay());
+            } catch (e2) {
+              console.error('exportPDF fallback error:', e2);
+              this.setStatus(`${this.t('exportFailed')}: ${e2 && e2.message ? e2.message : e2}`);
+              this._hideExportOverlay();
+            }
+          }
         } finally {
           const rootEl = document.documentElement;
           if (savedTheme !== null) rootEl.setAttribute('data-theme', savedTheme);
@@ -1597,9 +1670,12 @@
           if (printStyle && printStyle.parentNode) printStyle.parentNode.removeChild(printStyle);
           if (expandStyle && expandStyle.parentNode) expandStyle.parentNode.removeChild(expandStyle);
           if (printRoot && printRoot.parentNode) printRoot.parentNode.removeChild(printRoot);
-          // 先关遮罩再弹成功提示（DOCX/HTML 同口径：toast 不能被遮罩盖住）
-          this._hideExportOverlay();
-          if (pdfExported) this.showToast(this.t('exportSuccess'), 'success');
+          if (!handedOverToPrint) {
+            // 先关遮罩再弹成功提示（DOCX/HTML 同口径：toast 不能被遮罩盖住）。
+            // 回退路径的完成时机在系统打印对话框关闭后（afterprint），遮罩由其自管。
+            this._hideExportOverlay();
+            if (pdfExported) this.showToast(this.t('exportSuccess'), 'success');
+          }
         }
       },
       // PDF 用的 clone 准备：去交互件、摘 MathML 副本、图片内联、Mermaid 按固定 viewBox 重绘。
@@ -1645,6 +1721,105 @@
           }
         }
         return clone;
+      },
+      // 回退路径用：把 clone 组装成独立打印帧 HTML（完整 appCSS + 亮色 hljs + katex + 打印补充）
+      // async：hljs 亮色主题要优先取原文（见下方注释）。
+      async _buildPdfPrintFrameHtml(clone) {
+        const name = String(this.activeTab.name || '').replace(/\.[^.]+$/, '') || 'document';
+        const escapedTitle = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const colorScheme = document.documentElement.getAttribute('data-color-scheme') || 'default';
+        const appSheet = this._exportStyleFromLink((h) => /(^|\/)styles\.css(\?|$)/.test(h));
+        const katexSheet = this._exportStyleFromLink((h) => /katex/.test(h) && /\.css(\?|$)/.test(h));
+        const appCSS = this._absolutizeCssUrls(appSheet.css, appSheet.base);
+        const katexCSS = this._absolutizeCssUrls(katexSheet.css, katexSheet.base);
+        // hljs：本帧钉死 light 纸面（data-theme="light"），必须配**亮色**主题 ——
+        // styles.css 里只有 token 映射说明、没有 .hljs-* 配色，缺主题就是一片纯黑；
+        // 而暗色主题的 token 色印在白纸上又几乎看不见（用户反馈过「暗黑模式导出 PDF
+        // 代码块文字发灰看不清」）。故优先取亮色主题原文，取不到才退回当前加载主题。
+        const hljsCSS = (await this._loadStylesheetText('lib/highlight.js/github.min.css'))
+          || this._exportStyleFromLink((h) => /github|highlight|hljs/.test(h)).css;
+        const customFontStyleEl = document.getElementById('custom-fonts-style');
+        const customFontCSS = customFontStyleEl ? (customFontStyleEl.textContent || '') : '';
+
+        const printCSS = `
+    @page { margin: 1.5cm; }
+    html, body { margin: 0 !important; padding: 0 !important; background: white !important; }
+    .preview-content { max-width: 680px !important; margin: 0 auto !important; padding: 16px 24px !important; font-family: ${this._exportPdfFontStack()} !important; background: #fff !important; } /* 白纸语义：钉死纯白，nord 等方案的灰紫 --preview-bg 不得漏进来（2026-10-26） */
+    ${this._exportExpandRules('.preview-content')}
+    .preview-content pre code.hljs,
+    .preview-content pre .hljs { background: transparent !important; padding: 12px 16px !important; }
+    .code-line { display: flex !important; line-height: 1.8 !important; min-width: 0 !important; }
+    .code-line-num { flex-shrink: 0 !important; width: 3em !important; text-align: right !important; padding-right: 0.8em !important; color: #888 !important; user-select: none !important; display: none !important; }
+    .preview-content.code-line-numbers .code-line-num { display: inline !important; }
+    .code-line-text { flex: 1 1 auto !important; min-width: 0 !important; }
+    .mermaid-container { margin: 8px 0 !important; max-width: 100% !important; overflow: hidden !important; break-inside: avoid; page-break-inside: avoid; }
+    .mermaid-container svg { width: auto !important; max-width: 100% !important; height: auto !important; display: block !important; margin: 0 auto !important; }
+    h1, h2, h3 { page-break-after: avoid; }
+    blockquote, table, img, .math-display, .alert, .mermaid-container { page-break-inside: avoid; }
+    p, li { orphans: 3; widows: 3; }
+    input[type="checkbox"] { -webkit-appearance: none; appearance: none; margin-right: 8px; width: 16px; height: 16px; border: 1.5px solid #d4d4d8; border-radius: 3px; vertical-align: middle; position: relative; top: -1px; cursor: default; }
+    input[type="checkbox"]:checked { background: #16a34a; border-color: #16a34a; }
+    input[type="checkbox"]:checked::after { display: none !important; }`;
+
+        return `<!DOCTYPE html>
+    <html lang="zh-CN" data-color-scheme="${colorScheme}" data-theme="light">
+    <head><meta charset="UTF-8"><title>${escapedTitle}</title>
+    <style>${customFontCSS}${appCSS}${hljsCSS}${katexCSS}${printCSS}</style></head>
+    <body>
+    <div class="${clone.getAttribute('class') || 'preview-content'}">${clone.innerHTML}</div>
+    </body></html>`;
+      },
+      // 系统打印路径（iframe + contentWindow.print()）：用 OS 打印引擎生成 PDF。
+      // 不做落盘检测（OS 打印后台异步写盘，应用拿不到"写完"回调；警示已前置到确认框）。
+      // afterprint（用户在系统框里点完打印/取消后触发）一回调即收尾；30s watchdog 兜底异常。
+      async _exportViaSystemPrint(html, safeBaseName, escapedTitle, hideOverlay) {
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'position:fixed;left:-9999px;top:0;width:680px;height:600px;border:none;';
+        iframe.srcdoc = html;
+        document.body.appendChild(iframe);
+  
+        // 文件名来源：Chromium 打印 PDF 默认文件名取自【主窗口】(顶层 frame) title，
+        // 而非 srcdoc 子 frame <title>。故 onload 临时覆盖主窗口 document.title 为 md 文件名，
+        // 打印结束后还原（afterprint 或 watchdog 兜底）。同时显式写 contentDocument.title 兼容。
+        const originalTitle = document.title;
+        let titleRestored = false;
+        const restoreTitle = () => {
+          if (titleRestored) return;
+          titleRestored = true;
+          document.title = originalTitle;
+        };
+  
+        // 两条清理路径（afterprint / 30s 兜底 watchdog）共用 cleanupIframe + cleaned 互斥标志，
+        // 避免"iframe 已 remove 后再次读 contentWindow.removeEventListener"报 NPE。
+        let cleaned = false;
+        let finished = false;
+        const cleanupIframe = () => {
+          if (cleaned) return;
+          cleaned = true;
+          restoreTitle();
+          if (iframe.contentWindow) {
+            try { iframe.contentWindow.removeEventListener('afterprint', after); } catch (_) {}
+          }
+          if (iframe.parentNode) iframe.remove();
+        };
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(watchdog);
+          cleanupIframe();
+          hideOverlay();
+        };
+        const after = () => finish();
+        // 30s 兜底：覆盖"用户在系统框里点取消 / afterprint 不触发"等异常路径，
+        // 走完整收尾（清 iframe + 还原 title + 隐藏 overlay）。
+        const watchdog = setTimeout(finish, 30000);
+  
+        iframe.onload = () => {
+          if (iframe.contentDocument) iframe.contentDocument.title = escapedTitle;
+          document.title = safeBaseName; // 主窗口 title 决定系统打印对话框默认文件名
+          iframe.contentWindow.addEventListener('afterprint', after);
+          iframe.contentWindow.print();
+        };
       },
       getCachedImageURL(dataUri) {
         if (!dataUri || !dataUri.startsWith('data:')) return dataUri;

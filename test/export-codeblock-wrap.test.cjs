@@ -158,12 +158,20 @@ test('styles.css: .hljs 元素背景透明——统一用 pre 的 --code-bg（�
   );
 });
 
-test('exportPDF: 主路径不再手拼打印帧（styles.css 即真源，.hljs 透明规则天然生效）', async () => {
-  // 旧回退路径要手工把 styles.css 拼进独立帧，拼漏即 .hljs 白底回潮。2026-10-26 起主路径
-  // 在当前文档打印（同一份 styles.css），不存在"拼漏"面；静态锁定不得再有组帧逻辑。
+test('exportPDF: 打印帧组帧只准出现在能力回退分支（主路径在当前文档打印）', async () => {
+  // 主路径在当前文档打印（同一份 styles.css，.hljs 透明规则天然生效）；系统打印组帧
+  // 只准给「UA 判定不支持 PrintToPdf」的极旧运行时——catch 里 _exportViaSystemPrint
+  // 必须位于 else（不 capable）分支，capable 分支失败只能报错。
   const src = fs.readFileSync(pathMod.join(__dirname, '../src/modules/export.js'), 'utf8');
   const a = src.indexOf('async exportPDF() {');
   const body = src.slice(a, src.indexOf('async _preparePdfClone', a));
-  assert.ok(!/srcdoc/.test(body), 'exportPDF 不得再使用 srcdoc 组打印帧');
-  assert.ok(!/<iframe/.test(body), 'exportPDF 不得再创建打印 iframe');
+  const catchStart = body.indexOf('} catch (e) {');
+  const elseStart = body.indexOf('} else {', catchStart);
+  const finStart = body.indexOf('} finally {', catchStart);
+  assert.ok(catchStart > 0 && elseStart > catchStart && finStart > elseStart, 'catch/else/finally 结构缺失');
+  const capableBranch = body.slice(catchStart, elseStart);
+  const fallbackBranch = body.slice(elseStart, finStart);
+  assert.ok(!/_exportViaSystemPrint|_buildPdfPrintFrameHtml/.test(capableBranch),
+    'capable 分支不得回退系统打印（PDF 被占用等失败只准报错）');
+  assert.match(fallbackBranch, /_exportViaSystemPrint\(/, '不 capable 分支缺系统打印回退');
 });

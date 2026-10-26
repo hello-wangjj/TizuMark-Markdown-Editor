@@ -90,3 +90,54 @@ test('exportPDF: PrintToPdf 失败（PDF 被占用等）同样不建 iframe / �
     } finally { h.restore(); }
   });
 });
+
+test('exportPDF: 极旧运行时（无 PrintToPdf 能力）→ 系统打印 iframe 回退，afterprint 收尾', async () => {
+  await withEditor({ invokeImpl: pdfSaveInvoke }, async (w, ed) => {
+    // 2026-10-26 三轮：能力分流——stub 掉 UA 检测，模拟「UA Chrome 主版本 < 101」的
+    // 极旧 WebView2：走系统打印回退（iframe + contentWindow.print），功能不丢。
+    ed._supportsPrintToPdf = () => false;
+    ed.showConfirmDialog = async () => true;
+    ed.activeTab.name = 'NOTE.md';
+    ed.preview.innerHTML = '<p>可选中的正文</p>';
+    const h = installHarness(w);
+    try {
+      let printToPdfCalled = 0;
+      w.TauriApi.printToPdf = async () => { printToPdfCalled += 1; };
+      const exportPromise = ed.exportPDF().catch(() => {});
+      // 回退路径要先跑 _preparePdfClone + 组帧（jsdom 下多为快速空转），放宽等待
+      await delay(120);
+
+      assert.strictEqual(printToPdfCalled, 0, '无能力的运行时不得尝试 PrintToPdf');
+      const iframe = h.iframes[0];
+      assert.ok(iframe, '极旧运行时应回退建系统打印 iframe');
+      assert.match(iframe.srcdoc || '', /可选中的正文/, 'srcdoc 应含真实文字节点（PDF 文字可选中）');
+
+      let printed = 0;
+      iframe.contentWindow.print = () => { printed += 1; };
+      iframe.onload();
+      assert.strictEqual(printed, 1, 'onload 后应调用系统打印 print()');
+
+      iframe.contentWindow.dispatchEvent(new w.Event('afterprint'));
+      assert.strictEqual(iframe.parentNode, null, 'afterprint 后 iframe 应已清理');
+      assert.strictEqual(w.document.getElementById('tm-export-overlay'), null, '回退收尾后遮罩应隐藏');
+      await exportPromise;
+    } finally { h.restore(); }
+  });
+});
+
+test('_supportsPrintToPdf: UA Chrome 主版本 >= 101 判支持，< 101 判不支持，解析不到默认支持', async () => {
+  await withEditor({}, async (w, ed) => {
+    const withUa = async (ua, fn) => {
+      const proto = Object.getPrototypeOf(w.navigator);
+      const desc = Object.getOwnPropertyDescriptor(proto, 'userAgent');
+      Object.defineProperty(w.navigator, 'userAgent', { value: ua, configurable: true });
+      try { return await fn(); } finally {
+        if (desc) Object.defineProperty(proto, 'userAgent', desc);
+        else delete w.navigator.userAgent;
+      }
+    };
+    assert.strictEqual(await withUa('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0', () => ed._supportsPrintToPdf()), true, 'Chrome/142（新运行时）应判支持');
+    assert.strictEqual(await withUa('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.0 Safari/537.36 Edg/100.0.1181.0', () => ed._supportsPrintToPdf()), false, 'Chrome/100（无 PrintToPdf 的旧运行时）应判不支持');
+    assert.strictEqual(await withUa('Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 jsdom/24', () => ed._supportsPrintToPdf()), true, 'UA 解析不到 Chrome 版本应默认支持（宁可报错不冒进回退）');
+  });
+});

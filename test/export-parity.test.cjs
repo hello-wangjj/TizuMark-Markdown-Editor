@@ -96,22 +96,30 @@ test('导出 HTML：复用阅读模式样式（不再用平行维护的 _documen
 
 // ---------------------------------------------------------------- 导出 PDF
 
-test('导出 PDF：主路径走 PrintToPdf（无打印对话框 / 无下载气泡），且无系统打印回退', () => {
+test('导出 PDF：主路径走 PrintToPdf，系统打印仅作老运行时的能力回退（按 UA 能力分流）', () => {
   const body = sliceFn('async exportPDF() {', 'async _preparePdfClone');
   assert.ok(body.includes('TauriApi.printToPdf('), 'exportPDF 未走 WebView2 PrintToPdf');
   assert.ok(body.includes('await dialogSave('), 'exportPDF 未先让用户选保存路径（PrintToPdf 直接落盘）');
-  // 确认框文案与 DOCX 同风格（pdfTip1/pdfTip2），不再提「更多设置」——PrintToPdf 不经过
-  // 系统打印对话框，页眉/背景图形那些选项无从谈起
-  assert.ok(body.includes("this.t('pdfTip1')") && body.includes("this.t('pdfTip2')"),
-    'exportPDF 确认框未使用 pdfTip1/pdfTip2 新文案');
-  assert.ok(!body.includes('printTip'), 'exportPDF 仍引用旧 printTip 文案（描述的是已不存在的打印对话框选项）');
-  // 2026-10-26 用户要求：彻底移除系统打印回退——PDF 被占用等落盘失败时弹系统打印对话框
-  // 体验割裂，失败就明确报错。全源码不得再出现 iframe 打印路径。
-  assert.ok(!SRC.includes('_exportViaSystemPrint'), '仍残留 _exportViaSystemPrint（系统打印回退未删净）');
-  assert.ok(!SRC.includes('_buildPdfPrintFrameHtml'), '仍残留 _buildPdfPrintFrameHtml（回退帧未删净）');
-  assert.ok(!/iframe\.contentWindow\.print\(/.test(SRC), '仍残留 iframe.contentWindow.print()（系统打印路径未删净）');
+  // 2026-10-26 三轮（用户要求）：按能力分流——检测运行时是否支持 PrintToPdf（UA Chrome
+  // 主版本 >= 101）；支持时失败（如 PDF 被占用）必须报错、绝不弹系统打印（割裂体验）；
+  // 不支持的极旧运行时才回退系统打印，功能不丢。
+  assert.ok(body.includes('this._supportsPrintToPdf()'), 'exportPDF 未做 PrintToPdf 能力检测');
+  const catchStart = body.indexOf('} catch (e) {');
+  const elseStart = body.indexOf('} else {', catchStart);
+  const finStart = body.indexOf('} finally {', catchStart);
+  assert.ok(catchStart > 0 && elseStart > catchStart && finStart > elseStart, 'catch/else/finally 结构缺失');
+  const capableBranch = body.slice(catchStart, elseStart);
+  const fallbackBranch = body.slice(elseStart, finStart);
+  assert.ok(capableBranch.includes('setStatus'), 'capable 分支失败必须 setStatus 报错');
+  assert.ok(!/_exportViaSystemPrint|_buildPdfPrintFrameHtml/.test(capableBranch),
+    'capable 分支不得回退系统打印（PDF 被占用等失败只准报错）');
+  assert.match(fallbackBranch, /_exportViaSystemPrint\(/, '不 capable 分支缺系统打印回退');
+  // 支持检测本身：UA Chrome >= 101 判支持、解析不到默认支持（宁可报错不冒进回退）
+  const probe = sliceFn('_supportsPrintToPdf() {', 'async exportPDF() {');
+  assert.ok(probe.includes('Chrome'), '能力检测未解析 UA 的 Chrome 主版本');
+  assert.ok(probe.includes('101'), '能力检测未按 PrintToPdf 的发布版本（运行时 101.x）判界');
+  assert.ok(probe.includes('return true;'), 'UA 解析失败必须默认「支持」（不冒进回退）');
 });
-
 test('导出 PDF：打印态规则必须覆盖 styles.css 自带的 @media print（否则 UI 与遮罩被印进 PDF）', () => {
   const body = sliceFn('async exportPDF() {', 'async _preparePdfClone');
   // styles.css:8121 起的老 @media print 会用 #app{display:block!important} 把应用重新显示出来
@@ -252,6 +260,12 @@ test('导出 PDF：白纸语义——打印态强制亮色外观 + 字面量 #ff
     /#pdf-print-root \{ background: #fff !important; \}/,
     '#pdf-print-root 未钉死纯白（内容列外区域会露应用底色）');
   assert.ok(!/var\(--preview-bg/.test(body), '打印态底色仍依赖 --preview-bg 变量（主题漂移风险）');
+  // body 自带 transition: background-color .3s ease——白底规则生效后颜色是渐变过渡，
+  // PrintToPdf 在类翻转后约 100ms 快照会把过渡中的灰色印进 PDF（真机 timeline 实测）。
+  // 打印态必须全局禁用 transition。
+  assert.match(body,
+    /html\.pdf-printing, html\.pdf-printing body, html\.pdf-printing \* \{ transition: none !important; \}/,
+    '打印态未禁用 transition（PrintToPdf 会快照到渐变中的灰色页面底色）');
   // 成功 toast：导出完成后先关遮罩再弹（与 HTML/DOCX 同口径）
   assert.match(body, /if \(pdfExported\) this\.showToast\(this\.t\('exportSuccess'\), 'success'\)/,
     'PDF 导出成功未弹「导出成功」toast');
