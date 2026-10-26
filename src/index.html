@@ -801,13 +801,14 @@
     <div class="dialog confirm-dialog">
       <div class="dialog-header">
         <h2 id="confirm-dialog-title">确认</h2>
+        <button class="dialog-close" id="confirm-dialog-close" aria-label="关闭">&times;</button>
       </div>
       <div class="dialog-content">
+        <p id="confirm-dialog-message" style="white-space: pre-line;">确定要恢复默认设置吗？</p>
         <div id="confirm-dialog-warning" class="dialog-warning hidden">
           <span class="dialog-warning-icon" aria-hidden="true">⚠</span>
           <span id="confirm-dialog-warning-text"></span>
         </div>
-        <p id="confirm-dialog-message" style="white-space: pre-line;">确定要恢复默认设置吗？</p>
       </div>
       <div class="dialog-footer">
         <button id="confirm-dialog-cancel" class="dialog-btn">取消</button>

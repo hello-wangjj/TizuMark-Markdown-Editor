@@ -79,6 +79,15 @@ test('exportPDF: 确认框展示醒目警示文案，确认后走 PrintToPdf 主
       // （琥珀色 soft 类），不得用红色警示块。
       assert.ok(warnEl.classList.contains('dialog-warning-soft'),
         '能力检测通过时警示块必须是柔和琥珀变体（dialog-warning-soft）');
+      // 五轮（样式与 DOCX 完全一致）：警示在说明之后、说明合并为一段、确认键「导出」
+      const dlg = w.document.getElementById('confirm-dialog');
+      const msgEl = w.document.getElementById('confirm-dialog-message');
+      const domWarn = w.document.querySelector('#confirm-dialog-message + #confirm-dialog-warning');
+      assert.ok(domWarn, '警示块必须排在说明文字之后（DOCX 同款：提示在上、警示在下）');
+      assert.ok(dlg.classList.contains('confirm-dialog-docx'), 'soft 弹框应挂 DOCX 排版类');
+      assert.ok(!msgEl.textContent.includes('\n\n'), '说明文字应合并为一段（DOCX 同款），不得双换行分段');
+      assert.strictEqual(w.document.getElementById('confirm-dialog-confirm').textContent, '导出',
+        '确认键文案应与 DOCX 弹框一致为「导出」');
 
       w.document.getElementById('confirm-dialog-confirm').click();
       await exportPromise.catch(() => {});
@@ -129,6 +138,10 @@ test('exportPDF: 极旧运行时（不支持 PrintToPdf）→ 弹红色警示块
       '将走系统打印时必须是默认红色警示块（不得用柔和变体）');
     assert.match(warnTextEl.textContent, /系统打印/, '红色警示应说明会弹出系统打印对话框');
     assert.match(warnTextEl.textContent, /另存为 PDF/, '红色警示应提示在打印界面选「另存为 PDF」');
+    assert.ok(!w.document.getElementById('confirm-dialog').classList.contains('confirm-dialog-docx'),
+      '红色警示弹框不得挂 DOCX 柔和排版类');
+    assert.strictEqual(w.document.getElementById('confirm-dialog-confirm').textContent, '导出',
+      '回退场景确认键同样为「导出」');
 
     w.document.getElementById('confirm-dialog-cancel').click();
     await exportPromise.catch(() => {});

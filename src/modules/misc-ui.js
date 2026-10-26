@@ -423,10 +423,11 @@
           doc: document,
         });
       },
-      // warningTone：'danger'（默认红）| 'soft'（琥珀柔和，导出 PDF 能力检测通过时用）
-      showConfirmDialog(title, message, action = null, warning = null, warningTone = 'danger') {
+      // warningTone：'danger'（默认红）| 'soft'（琥珀柔和，DOCX 同款排版，导出 PDF 能力检测通过时用）
+      // confirmLabel：确认键自定义文案（如导出场景「导出」，默认保持「确认」）
+      showConfirmDialog(title, message, action = null, warning = null, warningTone = 'danger', confirmLabel = null) {
         return Dialogs.showConfirmDialog({
-          title, message, action, warning, warningTone,
+          title, message, action, warning, warningTone, confirmLabel,
           t: (k, p) => this.t(k, p),
           showToast: (msg, type) => this.showToast(msg, type),
           doc: document,

@@ -1553,7 +1553,8 @@ async fn print_to_pdf(
 ) -> Result<(), String> {
     use std::sync::mpsc::channel;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2_2, ICoreWebView2_7, ICoreWebView2Environment6,
+        ICoreWebView2_2, ICoreWebView2_7, ICoreWebView2Controller2, ICoreWebView2Environment6,
+        COREWEBVIEW2_COLOR,
     };
     use webview2_com::PrintToPdfCompletedHandler;
     use windows::core::{Interface, PCWSTR};
@@ -1573,9 +1574,36 @@ async fn print_to_pdf(
                 }
             };
             unsafe {
+                // 打印前把控制器默认背景临时改成纯白，打印完在回调里恢复。
+                // 根因（2026-10-27 用户实锤）：tauri.conf.json 的 backgroundColor="#f5f5f5"
+                // （防白屏闪烁）会成为 WebView2 控制器的 DefaultBackgroundColor，而
+                // PrintToPdf **用它画 PDF 的物理页边距区**（canvas 上 root 背景画不到的
+                // 部分）——前端 printStyle 把 html/body 全钉成 #fff 也管不到那里，PDF
+                // 四周永远一圈 #f5f5f5 灰。Chrome/CDP 没有 DefaultBackgroundColor 概念，
+                // 所以同样的 CSS 在 Chrome 打印验证里是纯白、真机却带灰圈。
+                // 注 1：DefaultBackgroundColor 在 ICoreWebView2Controller2（WebView2 1.0.664，
+                // 2020-09），比 PrintToPdf 所需的 ICoreWebView2_7 老得多，无版本顾虑。
+                // 注 2：必须从**控制器对象**上 QueryInterface（Controller2 派生自
+                // ICoreWebView2Controller），从 ICoreWebView2 上 cast 是一条不同的接口链，
+                // 会直接 E_NOINTERFACE（0x80004002）——2026-10-27 用户实测踩到，导出失败。
+                // 注 3：这一步只是美化（去灰圈），拿不到就跳过，绝不阻断导出。
+                // 外层已在 unsafe 块内，无需再嵌一层
+                let controller2 = platform.controller().cast::<ICoreWebView2Controller2>().ok();
+                // orig_bg 兜底值必须与 tauri.conf.json 的 backgroundColor 一致：万一某些
+                // 运行时不支持 GetDefaultBackgroundColor，恢复时不至于把 A=0 的透明色写回去。
+                let mut orig_bg = COREWEBVIEW2_COLOR { A: 255, R: 245, G: 245, B: 245 };
+                if let Some(c2) = controller2.clone() {
+                    let _ = c2.DefaultBackgroundColor(&mut orig_bg);
+                    let _ = c2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                        A: 255, R: 255, G: 255, B: 255,
+                    });
+                }
                 let core7 = match core.cast::<ICoreWebView2_7>() {
                     Ok(c) => c,
                     Err(e) => {
+                        if let Some(c2) = controller2.clone() {
+                            let _ = c2.SetDefaultBackgroundColor(orig_bg);
+                        }
                         let _ = tx.send(Err(format!("WebView2 运行时过旧（缺 PrintToPdf）: {e}")));
                         return;
                     }
@@ -1604,6 +1632,11 @@ async fn print_to_pdf(
                     }
                 };
                 let handler = PrintToPdfCompletedHandler::create(Box::new(move |hr, ok| {
+                    // 无论成败都把控制器默认背景恢复为打印前的值（#f5f5f5 防白闪）
+                    // （闭包在外层 unsafe 块内定义，无需再嵌 unsafe）
+                    if let Some(c2) = controller2.clone() {
+                        let _ = c2.SetDefaultBackgroundColor(orig_bg);
+                    }
                     let r = if hr.is_ok() && ok {
                         Ok(())
                     } else {

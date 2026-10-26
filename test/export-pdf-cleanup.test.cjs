@@ -80,6 +80,8 @@ test('exportPDF: PrintToPdf 失败（PDF 被占用等）同样不建 iframe / �
     ed.activeTab.name = 'NOTE.md';
     ed.preview.innerHTML = '<p>正文</p>';
     w.document.title = 'TizuMark';
+    const toasts = [];
+    ed.showToast = (msg, type) => toasts.push({ msg, type });
     const h = installHarness(w);
     try {
       await ed.exportPDF().catch(() => {});
@@ -87,6 +89,9 @@ test('exportPDF: PrintToPdf 失败（PDF 被占用等）同样不建 iframe / �
       assert.strictEqual(w.document.title, 'TizuMark', '失败路径不得改写主窗口 title');
       assert.strictEqual(h.longTimers.length, 0, '失败路径不得残留 30s 级兜底定时器');
       assert.strictEqual(w.document.getElementById('tm-export-overlay'), null, '失败后遮罩应收尾');
+      // 2026-10-27：失败必须看得见——左下角状态栏易被忽略，必须同时弹 danger toast
+      assert.ok(toasts.some((t) => t.type === 'danger' && /失败|Failed/.test(t.msg)),
+        `PrintToPdf 失败必须弹 danger toast（实际：${JSON.stringify(toasts)}）`);
     } finally { h.restore(); }
   });
 });

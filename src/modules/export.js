@@ -1500,12 +1500,15 @@
         //   不支持（极旧 WebView2，将走系统打印回退）：才弹红色警示块，说明会弹出系统
         //   打印对话框、需在其中选「另存为 PDF」。
         const capable = this._supportsPrintToPdf();
+        // 排版与导出 DOCX 弹框完全一致：说明文字合并为一段（tip1 + 空格 + tip2）、
+        // 大文件警示在说明**之后**（warning 块位于 message 下方）、确认键文案「导出」。
         const proceed = await this.showConfirmDialog(
           this.t('exportPDF'),
-          this.t('pdfTip1') + '\n\n' + this.t('pdfTip2'),
+          this.t('pdfTip1') + ' ' + this.t('pdfTip2'),
           null,
           capable ? this.t('pdfBigFileWarn') : this.t('pdfPrintFallbackWarn'),
           capable ? 'soft' : 'danger',
+          this.t('exportBtn'),
         );
         if (!proceed) return;
 
@@ -1646,7 +1649,11 @@
             // 运行时明明支持 PrintToPdf 还失败（PDF 被占用 / 磁盘错误等）——明确报错，
             // 绝不弹系统打印对话框（2026-10-26 用户反馈的割裂体验）。
             console.error('[exportPDF] PrintToPdf 失败:', e);
-            this.setStatus(`${this.t('exportFailed')}: ${e && e.message ? e.message : e}`);
+            // 失败必须**看得见**：左下角状态栏容易被忽略，同步弹 danger toast（2026-10-27
+            // 用户反馈"导出没有成功提示"实际是因为失败只落在状态栏）
+            const msg = `${this.t('exportFailed')}: ${e && e.message ? e.message : e}`;
+            this.setStatus(msg);
+            this.showToast(msg, 'danger');
           } else {
             // 极旧 WebView2 运行时（无 ICoreWebView2_7::PrintToPdf）：按用户指示回退
             // 系统打印，功能不丢。回退路径自行管理遮罩（afterprint/30s 收尾时隐藏）。
@@ -1657,7 +1664,9 @@
               await this._exportViaSystemPrint(html, safeBaseName, escapedTitle, () => this._hideExportOverlay());
             } catch (e2) {
               console.error('exportPDF fallback error:', e2);
-              this.setStatus(`${this.t('exportFailed')}: ${e2 && e2.message ? e2.message : e2}`);
+              const fbMsg = `${this.t('exportFailed')}: ${e2 && e2.message ? e2.message : e2}`;
+              this.setStatus(fbMsg);
+              this.showToast(fbMsg, 'danger');
               this._hideExportOverlay();
             }
           }

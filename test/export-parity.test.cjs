@@ -111,6 +111,10 @@ test('导出 PDF：主路径走 PrintToPdf，系统打印仅作老运行时的�
   assert.ok(probePos > -1 && dialogPos > probePos, '必须先完成 WebView2 能力检测再弹确认框');
   assert.ok(/'soft'\s*:\s*'danger'/.test(body), '确认框警示色调必须按能力分流（capable→soft / 回退→danger）');
   assert.ok(body.includes('pdfPrintFallbackWarn'), '系统打印回退场景缺红色警示文案（pdfPrintFallbackWarn）');
+  // 2026-10-26 五轮（样式与 DOCX 弹框完全一致）：说明合并为一段 + 确认键「导出」
+  assert.ok(body.includes("this.t('pdfTip1') + ' ' + this.t('pdfTip2')"),
+    '说明文字应合并为一段（DOCX 同款），不得双换行分段');
+  assert.ok(body.includes("this.t('exportBtn')"), '确认键文案应与 DOCX 弹框一致（exportBtn=导出）');
   const catchStart = body.indexOf('} catch (e) {');
   const elseStart = body.indexOf('} else {', catchStart);
   const finStart = body.indexOf('} finally {', catchStart);

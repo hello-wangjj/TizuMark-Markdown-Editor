@@ -6047,19 +6047,31 @@ body.tree-dragging {
   border-radius: 6px;
 }
 .dialog-warning.hidden { display: none; }
-/* 柔和警示变体（DOCX 弹框同风格）：琥珀色文字、无红底红边——用于「能力检测通过、
-   流程正常」场景（如导出 PDF 走 PrintToPdf 主路径）；红色警示块只留给真异常
-   （如极旧 WebView2 将走系统打印回退）。 */
+/* 柔和警示变体（DOCX 弹框同风格）：琥珀色文字、无红底红边、字号与 .docx-page-warn
+   一致（0.9231/1.6/400）、位置在说明文字之后（margin-top 10px 同款）——用于「能力
+   检测通过、流程正常」场景（如导出 PDF 走 PrintToPdf 主路径）；红色警示块只留给
+   真异常（如极旧 WebView2 将走系统打印回退）。 */
 .dialog-warning.dialog-warning-soft {
+  margin: 10px 0 0;
+  padding: 0 0 0 2px;
+  font-size: calc(var(--ui-font-size) * 0.9231);
+  font-weight: 400;
+  line-height: 1.6;
   color: var(--color-warning);
   background: transparent;
   border: none;
   border-left: none;
   border-radius: 0;
-  padding: 0 0 0 2px;
-  font-weight: 500;
 }
 .dialog-warning.dialog-warning-soft .dialog-warning-icon { display: none; }
+/* DOCX 同款排版：说明文字置灰（对应 .docx-page-tip 的 0.9615/1.7/secondary），
+   仅在柔和变体弹框（导出 PDF 主路径）生效，不影响其他确认框。 */
+.confirm-dialog-docx #confirm-dialog-message {
+  margin: 0 0 10px;
+  font-size: calc(var(--ui-font-size) * 0.9615);
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
 .dialog-warning-icon { flex: none; font-size: calc(var(--ui-font-size) * 1.2308); line-height: 1.4; }
 
 .save-dialog {

@@ -18,8 +18,11 @@ function buildDom() {
   mk('save-dialog-title', 'span'); mk('save-dialog-message', 'span');
   mk('save-dialog-save', 'button'); mk('save-dialog-discard', 'button'); mk('save-dialog-cancel', 'button');
   const cd = mk('confirm-dialog'); cd.classList.add('hidden');
-  mk('confirm-dialog-title', 'span'); mk('confirm-dialog-message', 'span');
-  mk('confirm-dialog-confirm', 'button'); mk('confirm-dialog-cancel', 'button');
+  mk('confirm-dialog-title', 'span').textContent = '确认'; mk('confirm-dialog-message', 'span');
+  mk('confirm-dialog-confirm', 'button').textContent = '确认';
+  mk('confirm-dialog-cancel', 'button').textContent = '取消';
+  // 标题栏 × 关闭按钮（与 DOCX 弹框一致）
+  mk('confirm-dialog-close', 'button');
   // 警示块：默认 hidden；传 warning 时移除 hidden。
   const warn = mk('confirm-dialog-warning'); warn.classList.add('hidden');
   mk('confirm-dialog-warning-text', 'span');
@@ -212,4 +215,46 @@ test('showConfirmDialog 关闭后复位 warningTone（防单例串色）', async
   assert.ok(!warn.classList.contains('dialog-warning-soft'));
   d.getElementById('confirm-dialog-cancel').click();
   await p2;
+});
+
+test('showConfirmDialog soft 弹框挂 confirm-dialog-docx 类、关闭后复位', async () => {
+  const { d } = buildDom();
+  const dlg = d.getElementById('confirm-dialog');
+  const p1 = showConfirmDialog({ title: '导出 PDF', warning: '警示', warningTone: 'soft', doc: d, t });
+  assert.ok(dlg.classList.contains('confirm-dialog-docx'),
+    'soft 弹框必须挂 confirm-dialog-docx 类（DOCX 同款排版：说明置灰/警示在下）');
+  d.getElementById('confirm-dialog-cancel').click();
+  await p1;
+  assert.ok(!dlg.classList.contains('confirm-dialog-docx'), '关闭后必须撤掉 docx 排版类');
+  // danger 弹框不挂
+  const p2 = showConfirmDialog({ title: '删除?', warning: '警示', doc: d, t });
+  assert.ok(!dlg.classList.contains('confirm-dialog-docx'));
+  d.getElementById('confirm-dialog-cancel').click();
+  await p2;
+});
+
+test('showConfirmDialog confirmLabel 自定义确认键文案并在关闭后还原', async () => {
+  const { d } = buildDom();
+  const btn = d.getElementById('confirm-dialog-confirm');
+  const p1 = showConfirmDialog({ title: '导出 PDF', confirmLabel: '导出', doc: d, t });
+  assert.strictEqual(btn.textContent, '导出', '确认键应显示自定义文案');
+  d.getElementById('confirm-dialog-cancel').click();
+  await p1;
+  assert.strictEqual(btn.textContent, '确认', '关闭后必须还原默认文案，防串到其他确认框');
+  // 不传 confirmLabel 时保持默认
+  const p2 = showConfirmDialog({ title: '删除?', doc: d, t });
+  assert.strictEqual(btn.textContent, '确认');
+  d.getElementById('confirm-dialog-cancel').click();
+  await p2;
+});
+
+test('showConfirmDialog 标题栏 × 关闭 = 取消（返回 false 且复位）', async () => {
+  const { d } = buildDom();
+  const p = showConfirmDialog({ title: '导出 PDF', message: '内容', warning: '警示', doc: d, t });
+  d.getElementById('confirm-dialog-close').click();
+  const r = await p;
+  assert.strictEqual(r, false, '× 关闭应等同取消');
+  assert.ok(d.getElementById('confirm-dialog').classList.contains('hidden'), '× 关闭后弹框隐藏');
+  assert.strictEqual(d.getElementById('confirm-dialog-warning-text').textContent, '',
+    '× 关闭后警示文本应复位');
 });
