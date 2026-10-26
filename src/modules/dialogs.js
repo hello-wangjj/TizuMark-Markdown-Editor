@@ -2,7 +2,7 @@
 // 设计：纯 DOM + 回调，不依赖渲染管线；i18n(t) 与提示(showToast)通过 opts 注入，
 // 与 preview-post / outline 模块的注入风格一致，降低改动爆炸半径。
 //   - showSaveDialog({ title, message, saveLabel, discardLabel, cancelLabel, t, doc }): Promise<'save'|'discard'|'cancel'>
-//   - showConfirmDialog({ title, message, action, t, showToast, doc }): Promise<boolean>
+//   - showConfirmDialog({ title, message, action, warning, warningTone, t, showToast, doc }): Promise<boolean>
 
 function showSaveDialog(opts) {
   const doc = opts.doc || document;
@@ -62,10 +62,12 @@ function showConfirmDialog(opts) {
     // 目录路径 / 用户文本在确认框执行，跨平台路径注入 XSS）。需要换行用 \n + pre-line。
     doc.getElementById('confirm-dialog-message').textContent = opts.message || '';
     // 可选警示块：默认隐藏，由调用方传 opts.warning 时打开（同样 textContent 防 XSS）。
+    // warningTone：'danger'（默认，红色警示块）/ 'soft'（琥珀色柔和提示，DOCX 同风格）。
     // DOM 不存在时静默跳过——dialogs.test.cjs 的 buildDom() 只造了 4 个 id，不含此节点。
     const warnEl = doc.getElementById('confirm-dialog-warning');
     const warnTextEl = doc.getElementById('confirm-dialog-warning-text');
     if (warnEl) {
+      warnEl.classList.toggle('dialog-warning-soft', opts.warningTone === 'soft');
       if (opts.warning) {
         if (warnTextEl) warnTextEl.textContent = opts.warning;
         warnEl.classList.remove('hidden');
@@ -79,7 +81,11 @@ function showConfirmDialog(opts) {
     const cleanup = () => {
       dialog.classList.add('hidden');
       // 复位警示块：避免单例对话框下次给"删除字体/重置设置/切换工作区"用时残留 PDF 警示
-      if (warnEl) warnEl.classList.add('hidden');
+      // （含 soft/danger 色调复位，防止上次导出 PDF 的琥珀样式串到其他红色警示场景）
+      if (warnEl) {
+        warnEl.classList.add('hidden');
+        warnEl.classList.remove('dialog-warning-soft');
+      }
       if (warnTextEl) warnTextEl.textContent = '';
       confirmBtn.removeEventListener('click', onConfirm);
       cancelBtn.removeEventListener('click', onCancel);

@@ -6047,6 +6047,19 @@ body.tree-dragging {
   border-radius: 6px;
 }
 .dialog-warning.hidden { display: none; }
+/* 柔和警示变体（DOCX 弹框同风格）：琥珀色文字、无红底红边——用于「能力检测通过、
+   流程正常」场景（如导出 PDF 走 PrintToPdf 主路径）；红色警示块只留给真异常
+   （如极旧 WebView2 将走系统打印回退）。 */
+.dialog-warning.dialog-warning-soft {
+  color: var(--color-warning);
+  background: transparent;
+  border: none;
+  border-left: none;
+  border-radius: 0;
+  padding: 0 0 0 2px;
+  font-weight: 500;
+}
+.dialog-warning.dialog-warning-soft .dialog-warning-icon { display: none; }
 .dialog-warning-icon { flex: none; font-size: calc(var(--ui-font-size) * 1.2308); line-height: 1.4; }
 
 .save-dialog {

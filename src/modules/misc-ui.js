@@ -423,9 +423,10 @@
           doc: document,
         });
       },
-      showConfirmDialog(title, message, action = null, warning = null) {
+      // warningTone：'danger'（默认红）| 'soft'（琥珀柔和，导出 PDF 能力检测通过时用）
+      showConfirmDialog(title, message, action = null, warning = null, warningTone = 'danger') {
         return Dialogs.showConfirmDialog({
-          title, message, action, warning,
+          title, message, action, warning, warningTone,
           t: (k, p) => this.t(k, p),
           showToast: (msg, type) => this.showToast(msg, type),
           doc: document,

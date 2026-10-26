@@ -1494,13 +1494,18 @@
       // 2026-10-26 用户要求**彻底移除**系统打印回退（PrintToPdf 落盘失败——如目标 PDF 被
       // 占用——时回退会突然弹出系统打印对话框，体验割裂）：失败就明确报错。
       async exportPDF() {
-        // 确认框文案与 DOCX 同风格：说明导出特性 + 大文件警示。不再提「更多设置」——
-        // PrintToPdf 不经过系统打印对话框，页眉/背景图形那些选项无从谈起。
+        // 能力分流（2026-10-26 用户四轮要求）：**弹确认框之前**先检测运行时是否支持
+        // PrintToPdf，按结果弹对应的弹框——
+        //   支持（主路径）：DOCX 同风格的柔和提示，大文件警示用琥珀色（soft），无红色警示块；
+        //   不支持（极旧 WebView2，将走系统打印回退）：才弹红色警示块，说明会弹出系统
+        //   打印对话框、需在其中选「另存为 PDF」。
+        const capable = this._supportsPrintToPdf();
         const proceed = await this.showConfirmDialog(
           this.t('exportPDF'),
           this.t('pdfTip1') + '\n\n' + this.t('pdfTip2'),
           null,
-          this.t('pdfBigFileWarn'),
+          capable ? this.t('pdfBigFileWarn') : this.t('pdfPrintFallbackWarn'),
+          capable ? 'soft' : 'danger',
         );
         if (!proceed) return;
 
@@ -1525,10 +1530,7 @@
         let pdfExported = false;
         let handedOverToPrint = false;
         const escapedTitle = safeBaseName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        // 能力分流（2026-10-26 用户三轮要求）：检测运行时是否支持 PrintToPdf——
-        // 支持则只走 PrintToPdf，落盘失败（如 PDF 被占用）明确报错、绝不弹系统打印；
-        // 不支持（极旧 WebView2，UA Chrome 主版本 < 101）才走系统打印回退。
-        const capable = this._supportsPrintToPdf();
+        // capable 已在确认框前检测（见方法开头）。
         // 恢复快照必须在任何可能提前 throw 之前捕获——否则 finally 的恢复逻辑会
         // 把用户当前主题/hljs 误当成「未设置」清掉（removeAttribute 的危险分支）。
         const rootEl0 = document.documentElement;

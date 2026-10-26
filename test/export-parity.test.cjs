@@ -104,6 +104,13 @@ test('导出 PDF：主路径走 PrintToPdf，系统打印仅作老运行时的�
   // 主版本 >= 101）；支持时失败（如 PDF 被占用）必须报错、绝不弹系统打印（割裂体验）；
   // 不支持的极旧运行时才回退系统打印，功能不丢。
   assert.ok(body.includes('this._supportsPrintToPdf()'), 'exportPDF 未做 PrintToPdf 能力检测');
+  // 2026-10-26 四轮：确认框必须在能力检测**之后**弹，且按结果选样式——支持走主路径
+  // 弹 DOCX 同风格柔和琥珀（soft），不支持（将走系统打印回退）才弹红色警示块（danger）。
+  const dialogPos = body.indexOf('this.showConfirmDialog(');
+  const probePos = body.indexOf('this._supportsPrintToPdf()');
+  assert.ok(probePos > -1 && dialogPos > probePos, '必须先完成 WebView2 能力检测再弹确认框');
+  assert.ok(/'soft'\s*:\s*'danger'/.test(body), '确认框警示色调必须按能力分流（capable→soft / 回退→danger）');
+  assert.ok(body.includes('pdfPrintFallbackWarn'), '系统打印回退场景缺红色警示文案（pdfPrintFallbackWarn）');
   const catchStart = body.indexOf('} catch (e) {');
   const elseStart = body.indexOf('} else {', catchStart);
   const finStart = body.indexOf('} finally {', catchStart);

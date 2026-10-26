@@ -75,6 +75,10 @@ test('exportPDF: 确认框展示醒目警示文案，确认后走 PrintToPdf 主
       assert.match(warnTextEl.textContent, /耐心等待/, '警示文案应含"耐心等待"');
       assert.match(warnTextEl.textContent, /未生成完/, '警示文案应含"未生成完"');
       assert.match(warnTextEl.textContent, /文件损坏/, '警示文案应含"文件损坏"');
+      // 2026-10-26 四轮：jsdom UA 解析为支持 PrintToPdf → 弹 DOCX 同风格柔和弹框
+      // （琥珀色 soft 类），不得用红色警示块。
+      assert.ok(warnEl.classList.contains('dialog-warning-soft'),
+        '能力检测通过时警示块必须是柔和琥珀变体（dialog-warning-soft）');
 
       w.document.getElementById('confirm-dialog-confirm').click();
       await exportPromise.catch(() => {});
@@ -109,6 +113,25 @@ test('exportPDF: 用户点取消 → 既不选保存路径，也不打印', asyn
     } finally {
       h.restore();
     }
+  });
+});
+
+test('exportPDF: 极旧运行时（不支持 PrintToPdf）→ 弹红色警示块，说明将走系统打印', async () => {
+  await withEditor({ invokeImpl: pdfSaveInvoke }, async (w, ed) => {
+    ed._supportsPrintToPdf = () => false;
+    ed.activeTab.name = 'NOTE.md';
+    const exportPromise = ed.exportPDF();
+    await delay(5);
+    const warnEl = w.document.getElementById('confirm-dialog-warning');
+    const warnTextEl = w.document.getElementById('confirm-dialog-warning-text');
+    assert.ok(!warnEl.classList.contains('hidden'), '回退场景必须弹警示块');
+    assert.ok(!warnEl.classList.contains('dialog-warning-soft'),
+      '将走系统打印时必须是默认红色警示块（不得用柔和变体）');
+    assert.match(warnTextEl.textContent, /系统打印/, '红色警示应说明会弹出系统打印对话框');
+    assert.match(warnTextEl.textContent, /另存为 PDF/, '红色警示应提示在打印界面选「另存为 PDF」');
+
+    w.document.getElementById('confirm-dialog-cancel').click();
+    await exportPromise.catch(() => {});
   });
 });
 

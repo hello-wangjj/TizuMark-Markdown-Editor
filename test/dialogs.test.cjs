@@ -182,3 +182,34 @@ test('showConfirmDialog warning 含恶意 HTML 不执行（XSS）', async () => 
   d.getElementById('confirm-dialog-cancel').click();
   await p;
 });
+
+test('showConfirmDialog warningTone soft 挂柔和类、默认 danger 不挂', async () => {
+  const { d } = buildDom();
+  const warn = d.getElementById('confirm-dialog-warning');
+  // soft：琥珀柔和变体（导出 PDF 能力检测通过时用）
+  const p1 = showConfirmDialog({ title: '导出 PDF', warning: '大文件警示', warningTone: 'soft', doc: d, t });
+  assert.ok(warn.classList.contains('dialog-warning-soft'), 'soft 应挂 dialog-warning-soft 类');
+  d.getElementById('confirm-dialog-cancel').click();
+  await p1;
+  // 默认 danger：不挂 soft 类
+  const p2 = showConfirmDialog({ title: '导出 PDF', warning: '红色警示', doc: d, t });
+  assert.ok(!warn.classList.contains('dialog-warning-soft'), '默认 danger 不得挂 soft 类');
+  d.getElementById('confirm-dialog-cancel').click();
+  await p2;
+});
+
+test('showConfirmDialog 关闭后复位 warningTone（防单例串色）', async () => {
+  const { d } = buildDom();
+  const warn = d.getElementById('confirm-dialog-warning');
+  const p1 = showConfirmDialog({ title: '导出 PDF', warning: '大文件警示', warningTone: 'soft', doc: d, t });
+  assert.ok(warn.classList.contains('dialog-warning-soft'));
+  d.getElementById('confirm-dialog-cancel').click();
+  await p1;
+  assert.ok(!warn.classList.contains('dialog-warning-soft'),
+    'cleanup 必须撤掉 soft 类，防止琥珀样式残留到下次红色警示场景');
+  // 再次打开（不传 tone）应回到默认红色样式
+  const p2 = showConfirmDialog({ title: '删除?', warning: '不可恢复', doc: d, t });
+  assert.ok(!warn.classList.contains('dialog-warning-soft'));
+  d.getElementById('confirm-dialog-cancel').click();
+  await p2;
+});
